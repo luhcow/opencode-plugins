@@ -1,0 +1,35 @@
+{
+  "name": "opencode-recall",
+  "version": "0.1.0",
+  "description": "OpenCode V2 semantic session history search (RAG) plugin powered by node-llama-cpp and SQLite.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "dependencies": {
+    "node-llama-cpp": "^3.16.2"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.2.2 <3"
+  },
+  "engines": { "node": ">=22.13.0" },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "session",
+    "rag",
+    "recall",
+    "semantic-search",
+    "sqlite",
+    "node-llama-cpp"
+  ]
+}

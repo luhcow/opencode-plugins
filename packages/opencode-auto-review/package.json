@@ -1,0 +1,41 @@
+{
+  "name": "opencode-auto-review",
+  "version": "0.1.0",
+  "description": "Codex Guardian-style automatic permission review for OpenCode V2 using /v1/decisions and synchronous chat fallback.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui.tsx",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "NOTICE",
+    "LICENSES",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.2.2 <3",
+    "@opentui/core": ">=0.7.0 <0.9",
+    "@opentui/solid": ">=0.7.0 <0.9",
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.2.2",
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
+    "@types/node": "^24.3.0",
+    "solid-js": "1.9.12",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

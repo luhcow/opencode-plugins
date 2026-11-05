@@ -1,0 +1,32 @@
+{
+  "name": "opencode-a2a",
+  "version": "0.1.0",
+  "description": "Generic Google A2A SDK (HTTP+JSON REST binding) plugin for OpenCode V2 with multi-agent config, flexible token auth, Agent Card skill discovery, SSE streaming, and multi-turn contextId support.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.2.2 <3"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "a2a",
+    "agent-to-agent",
+    "agent-card",
+    "google-a2a",
+    "rest",
+    "sse"
+  ]
+}

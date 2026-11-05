@@ -1,0 +1,8 @@
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This plugin adapts Guardian prompt templates, transcript framing, assessment
+parsing and decisions contracts from https://github.com/openai/codex.
+Those portions retain Apache-2.0, reproduced in LICENSES/Apache-2.0.txt.
+They have been modified and ported to TypeScript for the OpenCode plugin API.
+The combined plugin is distributed under GPL-3.0-or-later (see LICENSE).

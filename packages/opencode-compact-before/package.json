@@ -1,0 +1,27 @@
+{
+  "name": "opencode-compact-before",
+  "version": "0.1.0",
+  "description": "Select a user message and compact earlier history into a native OpenCode checkpoint.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui/index.ts",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "NOTICE",
+    "src"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:tui": "bun scripts/test-tui.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.2.2 <3",
+    "@opencode/client": ">=2.2.2 <3",
+    "@opentui/core": ">=0.7.0 <0.9",
+    "solid-js": ">=1.9.0"
+  }
+}

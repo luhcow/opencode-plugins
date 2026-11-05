@@ -1,0 +1,26 @@
+{
+  "name": "opencode-tps",
+  "version": "0.1.0",
+  "description": "Real-time token/s (tok/s) display in the OpenCode TUI prompt footer with live streaming estimation and exact usage calibration.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui.ts",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:tui": "bun scripts/test-tui.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.2.2 <3",
+    "@opentui/core": ">=0.7.0 <0.9",
+    "@opentui/solid": ">=0.7.0 <0.9",
+    "solid-js": ">=1.9.0"
+  }
+}

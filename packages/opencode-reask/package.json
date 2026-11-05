@@ -1,0 +1,36 @@
+{
+  "name": "opencode-reask",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin to re-answer submitted or cancelled Ask (question) tool calls with selective revert and TUI mouse/keyboard support.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui.ts",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "NOTICE",
+    "index.ts",
+    "tui.ts",
+    "rpc.ts",
+    "src"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.2.2 <3"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-tui",
+    "question",
+    "ask",
+    "reask",
+    "revert"
+  ]
+}
