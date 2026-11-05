@@ -26,18 +26,20 @@ OpenCode V2 插件：支持在 **Ask（`question` 工具）提交后** 或 **问
 
 ## 安装与配置
 
-在本仓库根目录的项目级 `opencode.jsonc` 中添加相对路径；其他项目使用实际安装位置或发布后的包名：
+在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中引用公开仓库的发布标签：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./packages/opencode-reask"
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-reask"
   ]
 }
 ```
 
-OpenCode V2 会自动加载该目录下的 Server 入口（`index.ts`）、TUI 入口（`tui.ts`）和 RPC 契约（`rpc.ts`）。如果当前已打开 TUI，执行 `/reload` 即可生效。
+OpenCode V2 通过包的 `exports` 自动加载 Server、TUI 和 RPC 契约。配置修改后自动重载，也可执行 `/reload` 强制重载。
+
+本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-reask` 。相对路径以配置文件所在目录解析。
 
 需要宿主支持 `session.revert` 和 `session.form` API。所有操作使用当前宿主连接，适用于本地、独立和远程服务。
 新答案通过宿主的插件 storage 保存，并用于更新该会话的模型上下文。

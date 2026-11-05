@@ -11,16 +11,18 @@
 
 ## 安装与配置
 
-在本仓库根目录的项目级 `opencode.jsonc` 中配置；其他项目使用实际安装位置或发布后的包名：
+在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中引用公开仓库的发布标签：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./packages/opencode-tps"
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-tps"
   ]
 }
 ```
+
+本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-tps` 。相对路径以配置文件所在目录解析。
 
 ## 运行测试
 

@@ -12,7 +12,20 @@
 “从下面这条消息开始保留在上下文中”。旧会话中的检查点会随原生历史加载、翻页自动定位。
 再次压缩后显示新的边界；停用插件后恢复原生时间线显示。
 
-在 `opencode.jsonc` 的 `plugins` 中加入本目录，即可加载 server 和 TUI 两部分。
+## 安装与配置
+
+在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中引用公开仓库的发布标签，即可加载 server 和 TUI 两部分：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-compact-before"
+  ]
+}
+```
+
+本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-compact-before` 。相对路径以配置文件所在目录解析。
 
 ## 实现
 

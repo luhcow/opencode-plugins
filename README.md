@@ -18,18 +18,20 @@ OpenCode V2 插件 Monorepo。
 
 开发验证需要 Node.js 22.13+（建议 Node.js 24）、npm 和 OpenCode V2。依赖锁定验证基线为 `@opencode/plugin` 2.2.2 / OpenTUI 0.7.0；使用 TUI 内部节点的插件需要兼容的宿主版本。
 
-从本仓库根目录执行 `npm ci`，在该目录的项目级 `opencode.jsonc` 中配置所需插件：
+### 从 GitHub 安装
+
+仓库已公开，可直接引用 `v0.1.0` 标签下的插件子目录。在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中配置所需插件：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./packages/opencode-auto-rename",
-    "./packages/opencode-reask",
-    "./packages/opencode-compact-before",
-    "./packages/opencode-tps",
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-auto-rename",
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-reask",
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-compact-before",
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-tps",
     {
-      "package": "./packages/opencode-auto-review",
+      "package": "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-auto-review",
       "options": {
         "humanFallback": true
       }
@@ -38,8 +40,16 @@ OpenCode V2 插件 Monorepo。
 }
 ```
 
-在其他项目或全局配置中加载时，路径需指向自己的安装位置。发布到 npm 后可以直接使用对应包名。
-`recall` 会读取宿主历史数据库并首次下载本地向量模型；`a2a` 需要配置自己的服务。两者的配置和数据流见各自 README。
+另外两个插件可按需添加：
+
+- [`recall`](./packages/opencode-recall)：`github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-recall` ，会读取宿主历史数据库并首次下载本地向量模型。
+- [`a2a`](./packages/opencode-a2a)：`github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-a2a` ，需在 `options.agents` 中配置自己的服务。
+
+`::path:` 用于选择 Monorepo 内的插件包，不能省略。以上 Git 引用可直接安装，无需等待 npm 发布。完整配置和数据流见各插件 README。
+
+### 本地开发
+
+克隆本仓库并在根目录执行 `npm ci` ，将项目级配置中的 Git 引用换为对应的 `./packages/opencode-<name>` 目录。相对路径以配置文件所在目录解析；全局配置需填写指向实际 checkout 的路径。
 
 ## 运行测试
 

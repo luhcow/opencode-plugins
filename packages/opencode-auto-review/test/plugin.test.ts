@@ -6,6 +6,7 @@ import type { PermissionEvent } from "../src/transcript.js"
 function createMockHost(config: {
   options?: Record<string, unknown>
   messages?: unknown[]
+  agentModel?: { providerID: string; id: string; variant?: string }
   models?: Array<{
     providerID: string
     id: string
@@ -114,7 +115,7 @@ function createMockHost(config: {
       default: async () => ({ data: { providerID: "example-provider", id: "chat-model" } }),
     },
     agent: {
-      get: async () => ({ data: {} }),
+      get: async () => ({ data: config.agentModel ? { model: config.agentModel } : {} }),
     },
     generate: {
       text: async (req: { prompt: string; model: { providerID: string; id: string; variant?: string } }) => {
@@ -357,5 +358,67 @@ test("chat model primary reviewer supports Codex shorthand {\"outcome\":\"allow\
 
   await host.evaluate(event)
   assert.equal(event.effect, "allow")
+  await dispose?.()
+})
+
+test("unconfigured primary model automatically inherits conversation model (#low preferred) when agent model is absent", async () => {
+  let invokedModel: unknown
+  const host = createMockHost({
+    options: {
+      humanFallback: true,
+    },
+    messages: [
+      { id: "u1", type: "user", text: "Read local project file." },
+      {
+        id: "a1",
+        type: "assistant",
+        model: {
+          providerID: "example-provider",
+          id: "chat-model",
+          variant: "high",
+        },
+        content: [
+          {
+            id: "t1",
+            type: "tool",
+            name: "read",
+            state: {
+              status: "running",
+              input: { path: "README.md" },
+            },
+          },
+        ],
+      },
+    ],
+    onText: async (req) => {
+      invokedModel = req.model
+      return {
+        text: '{"outcome":"allow","risk_level":"low","user_authorization":"high","rationale":"User requested reading local readme."}',
+      }
+    },
+  })
+
+  const dispose = await plugin.setup(host.ctx as never)
+  const event: PermissionEvent = {
+    sessionID: "ses_1",
+    action: "read",
+    resources: ["README.md"],
+    effect: "ask",
+    source: { type: "tool", id: "t1", messageID: "a1" },
+  }
+
+  await host.evaluate(event)
+  await new Promise((r) => setTimeout(r, 10))
+
+  assert.deepEqual(invokedModel, {
+    providerID: "example-provider",
+    id: "chat-model",
+    variant: "low",
+  })
+  assert.equal(event.effect, "allow")
+  assert.match(
+    event.message ?? "",
+    /no reviewer model configured; inheriting conversation model example-provider\/chat-model/,
+  )
   await dispose?.()
 })

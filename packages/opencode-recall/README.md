@@ -22,13 +22,13 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
 
 ## 配置方式
 
-在本仓库根目录的项目级 `opencode.jsonc` 中添加插件；其他项目使用自己的安装位置或发布后的包名：
+在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中引用公开仓库的发布标签：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./packages/opencode-recall"
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-recall"
   ]
 }
 ```
@@ -37,7 +37,7 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
 
 ```jsonc
 {
-  "package": "./packages/opencode-recall",
+  "package": "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-recall",
   "options": {
     "modelUri": "hf:Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
     "contextSize": 2048,
@@ -47,6 +47,8 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
   }
 }
 ```
+
+本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-recall` 。插件引用中的相对路径以配置文件所在目录解析。
 
 ### 路径与数据
 

@@ -59,8 +59,6 @@ export default Plugin.define({
     const options = parseOptions(ctx.options)
     let enabled = options.enabled
     let humanFallback = options.humanFallback
-    let cachedPrimaryModel: { model: ReviewerModelRef | undefined; notices: string[] } | undefined
-    let pendingPrimaryModel: Promise<{ model: ReviewerModelRef | undefined; notices: string[] }> | undefined
     const modelController = new AbortController()
     const inFlight = new Map<string, Promise<EvaluationVerdict>>()
     const activeControllers = new Map<AbortController, string>()
@@ -336,7 +334,11 @@ export default Plugin.define({
       signal: AbortSignal,
       deadline: number,
     ): Promise<EvaluationVerdict> {
-      const resolved = await raceWithAbort(getPrimaryModel(), signal)
+      const catalog = await raceWithAbort(ctx.model.list({ types: ["chat", "decision"] }, { signal }), signal)
+      const resolved = await raceWithAbort(
+        resolvePrimaryModel(messages, event, catalog.data, signal),
+        signal,
+      )
       const notices = resolved.notices
       if (!resolved.model) {
         return {
@@ -347,7 +349,6 @@ export default Plugin.define({
       }
 
       const primaryModel = resolved.model
-      const catalog = await raceWithAbort(ctx.model.list({ types: ["chat", "decision"] }, { signal }), signal)
       const info = catalog.data.find(
         (item) => item.providerID === primaryModel.providerID && item.id === primaryModel.id,
       )
@@ -589,31 +590,34 @@ export default Plugin.define({
         return applyPreferredLowVariant(parsed, catalog, Boolean(parsed.variant))
       }
 
-      // Inherit the parent conversation model (`codex-rs/ext/guardian-reviewer/src/model.rs`):
-      // 1. Check the assistant message that initiated the tool call (`event.source.messageID`),
-      //    or the most recent assistant message in the transcript.
-      const inheritedFromMessages = extractConversationModel(messages, event.source?.messageID)
-      if (inheritedFromMessages) {
-        const resolved = applyPreferredLowVariant(inheritedFromMessages, catalog, false)
-        if (resolved) return resolved
+      return await resolveConversationModel(ctx, messages, event, catalog, signal)
+    }
+
+    async function resolvePrimaryModel(
+      messages: readonly unknown[],
+      event: PermissionEvent,
+      catalog: ReadonlyArray<{
+        providerID: string
+        id: string
+        type?: unknown
+        variants?: ReadonlyArray<{ id: string }>
+      }>,
+      signal: AbortSignal,
+    ): Promise<{ model: ReviewerModelRef | undefined; notices: string[] }> {
+      if (options.model) {
+        return { model: parseModelRef(options.model), notices: [] }
       }
 
-      // 2. Fallback to `ctx.session.get({ sessionID })` if the message lacked `.model`.
-      try {
-        const session = (await raceWithAbort(
-          ctx.session.get({ sessionID: event.sessionID }),
-          signal,
-        )) as { model?: unknown } | undefined
-        const sessionModel = extractModelRefObject(session?.model)
-        if (sessionModel) {
-          const resolved = applyPreferredLowVariant(sessionModel, catalog, false)
-          if (resolved) return resolved
-        }
-      } catch {
-        // Ignore session lookup failure and fall through
+      const notices: string[] = []
+      const conversationModel = await resolveConversationModel(ctx, messages, event, catalog, signal)
+      if (conversationModel) {
+        notices.push(
+          `no reviewer model configured; inheriting conversation model ${conversationModel.providerID}/${conversationModel.id}`,
+        )
+        return { model: conversationModel, notices }
       }
 
-      return undefined
+      return { model: undefined, notices }
     }
 
     async function loadSessionMessages(
@@ -636,29 +640,6 @@ export default Plugin.define({
         if (attempt < 3) await delay(25 * 2 ** attempt, signal)
       }
       return undefined
-    }
-
-    async function getPrimaryModel(): Promise<{ model: ReviewerModelRef | undefined; notices: string[] }> {
-      if (cachedPrimaryModel) return cachedPrimaryModel
-      const pending = (pendingPrimaryModel ??= (async () => {
-        const notices: string[] = []
-        const selected = await resolvePrimaryModel(
-          ctx,
-          options.agent,
-          options.model,
-          options.timeoutMs,
-          modelController.signal,
-          notices,
-        )
-        return { model: selected, notices }
-      })())
-      try {
-        const resolved = await pending
-        cachedPrimaryModel = resolved
-        return resolved
-      } finally {
-        pendingPrimaryModel = undefined
-      }
     }
 
     function askHuman(event: PermissionEvent, reason: string, notices: readonly string[] = []): void {
@@ -770,50 +751,39 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-async function resolvePrimaryModel(
+async function resolveConversationModel(
   ctx: Plugin.Context,
-  agentID: string,
-  configured: string | undefined,
-  timeoutMs: number,
-  parentSignal: AbortSignal,
-  notices: string[],
+  messages: readonly unknown[],
+  event: PermissionEvent,
+  catalog: ReadonlyArray<{
+    providerID: string
+    id: string
+    type?: unknown
+    variants?: ReadonlyArray<{ id: string }>
+  }>,
+  signal: AbortSignal,
 ): Promise<ReviewerModelRef | undefined> {
-  if (parentSignal.aborted) return undefined
-  if (configured) return parseModelRef(configured)
-
-  const controller = new AbortController()
-  const onParentAbort = () => controller.abort()
-  parentSignal.addEventListener("abort", onParentAbort, { once: true })
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    try {
-      const agent = await raceWithAbort(ctx.agent.get({ agentID }, { signal: controller.signal }), controller.signal)
-      if (agent.data.model) {
-        notices.push(
-          `no reviewer model configured; using the "${agentID}" agent model ${agent.data.model.providerID}/${agent.data.model.id}`,
-        )
-        return copyModelRef(agent.data.model)
-      }
-    } catch (error) {
-      notices.push(`reviewer agent lookup failed: ${describeError(error)}`)
-    }
-    if (controller.signal.aborted) return undefined
-    try {
-      const fallback = await raceWithAbort(ctx.model.default({}, { signal: controller.signal }), controller.signal)
-      if (fallback.data) {
-        notices.push(
-          `no reviewer model configured; using the catalog default model ${fallback.data.providerID}/${fallback.data.id}`,
-        )
-        return copyModelRef(fallback.data)
-      }
-    } catch (error) {
-      notices.push(`reviewer default model lookup failed: ${describeError(error)}`)
-    }
-    return undefined
-  } finally {
-    clearTimeout(timer)
-    parentSignal.removeEventListener("abort", onParentAbort)
+  const inheritedFromMessages = extractConversationModel(messages, event.source?.messageID)
+  if (inheritedFromMessages) {
+    const resolved = applyPreferredLowVariant(inheritedFromMessages, catalog, false)
+    if (resolved) return resolved
   }
+
+  try {
+    const session = (await raceWithAbort(
+      ctx.session.get({ sessionID: event.sessionID }),
+      signal,
+    )) as { model?: unknown } | undefined
+    const sessionModel = extractModelRefObject(session?.model)
+    if (sessionModel) {
+      const resolved = applyPreferredLowVariant(sessionModel, catalog, false)
+      if (resolved) return resolved
+    }
+  } catch {
+    // Ignore session lookup failure and fall through
+  }
+
+  return undefined
 }
 
 function copyModelRef(model: ReviewerModelRef): ReviewerModelRef {

@@ -17,16 +17,16 @@
 
 ## 配置示例
 
-在 `~/.config/opencode/opencode.jsonc` 中配置：
+在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中引用公开仓库的发布标签：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "./packages/opencode-auto-review",
+      "package": "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-auto-review",
       "options": {
-        // model 省略时使用 auto-reviewer agent 的模型或宿主默认模型
+        // model 省略时直接继承当前对话模型（并优先使用 #low 档位）
         // reviewModel 省略时默认自动继承当前对话模型（并优先使用 #low 档位）
         "humanFallback": true
       }
@@ -35,7 +35,7 @@
 }
 ```
 
-上例用于本仓库根目录的项目配置。发布后可将路径换成 npm 包名。
+本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-auto-review` 。相对路径以配置文件所在目录解析。
 `model` / `reviewModel` 支持宿主中可用的 `provider/model[#variant]`，不依赖特定提供商。
 主模型是 chat 类型时直接进行同步复核。审查会将用户指令、近期工具上下文和待执行操作发送给选定模型。
 `humanFallback` 默认 `false`（无法判定时拒绝）；上例设为 `true` 时转为人工确认。

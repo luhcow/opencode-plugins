@@ -4,13 +4,13 @@ OpenCode V2 的通用 A2A HTTP+JSON REST 客户端插件。支持多 Agent、Age
 
 ## 配置
 
-以下配置放在本仓库根目录的项目级 `opencode.jsonc` 中。用于其他项目时替换为实际安装位置，或发布后的 npm 包名。
+在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中引用公开仓库的发布标签：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [{
-    "package": "./packages/opencode-a2a",
+    "package": "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-a2a",
     "options": {
       "agents": {
         "research": {
@@ -25,6 +25,8 @@ OpenCode V2 的通用 A2A HTTP+JSON REST 客户端插件。支持多 Agent、Age
 ```
 
 域名为虚构示例，需替换为自己的服务。插件没有内置服务地址或凭据。
+
+本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-a2a` 。插件引用中的相对路径以配置文件所在目录解析。
 
 - `agents` 可为对象或数组；未配置 Agent 时不连接任何服务。
 - `url` 用于发现 `/.well-known/agent-card.json`，兼容 `/.well-known/agent.json`。

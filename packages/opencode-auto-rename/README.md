@@ -10,16 +10,16 @@ OpenCode's built-in title generator runs at the beginning of Turn 1 using only t
 
 ## Configure
 
-From this repository, add the relative package path to `plugins` in a project-level `opencode.jsonc`:
+Add the public GitHub release reference to `plugins` in your global or project-level `opencode.jsonc`:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./packages/opencode-auto-rename"
+    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-auto-rename"
   ]
 }
 ```
 
-For other projects, use the installed package name after publication, or a path to your checkout.
+For local development, run `npm ci` at the repository root and use `./packages/opencode-auto-rename` in that directory's project config. Relative paths resolve from the config file.
 The first request and reply are sent to the configured title agent model, falling back to the session model.
