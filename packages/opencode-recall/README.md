@@ -5,8 +5,8 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
 ## 核心特性
 
 1. **直接 `ATTACH` OpenCode 原生 SQLite 库 + 双表解耦（`session_turns` + `embeddings`）**：
-   - 只读挂载 `~/.local/share/opencode/opencode.db`（`file:...?mode=ro`），直接对齐 `session_v2` 与 `session_message`（包含正在运行中会话的已完成历史轮次）。
-   - `session_turns` 按 `(session_id, user_message_id)` 维护有效对话轮次，自动感知并清理多次穿插回滚（`revert`）、原地消息更新与已删除会话。
+   - 只读挂载 `~/.local/share/opencode/opencode.db`（`file:...?mode=ro`），直接对齐 `session_v2`、`session_message` 及 OpenCode 2.2.1+ 的 `session_part` 分表存储（兼容旧版内联 `session_message.data.content` 与新版 `session_part` 混合布局，包含正在运行中会话的已完成历史轮次）。
+   - `session_turns` 按 `(session_id, user_message_id)` 维护有效对话轮次，自动感知并清理多次穿插回滚（`revert`）、原地消息或分片（`session_part`）更新与已删除会话；当消息从内联迁移至 `session_part` 且正文未变时，保持已有 `content_hash` 与向量不触发重算。
    - `embeddings` 按 `(content_hash, chunk_index)` 复合主键存储向量：会话分叉（Fork）克隆的历史轮次 100% 复用已有向量，零重复推理；源会话回滚或删除后，只要仍有 Fork 会话引用该轮次，向量自动保留。
 2. **2048 Token 上下文预算 + 超长轮次自动多分片 + 单条流式处理**：
    - 显式限制 `contextSize = 2048`（单切片上限 `2000` Tokens，重叠步长 `128` Tokens），消除默认 32K 上下文带来的数 GB 内存开销。
@@ -58,7 +58,7 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
 - 文件路径支持 `~` 和相对路径；相对路径按插件工作区解析。索引库和宿主库必须是不同文件。
 - `scope: "project"` 使用调用会话的项目标识，缺少项目及目录时返回空结果；`scope: "all"` 显式搜索所有已索引项目。返回片段会进入当前模型上下文。
 
-需要支持 `node:sqlite` 的宿主运行时，以及所用 OpenCode 版本的 `session_v2` / `session_message` 表结构。GGUF 下载需要网络；推理不向远端发送会话文本。索引在本地保留，随源会话删除或回滚在后续同步时清理。
+需要支持 `node:sqlite` 的宿主运行时，以及所用 OpenCode 版本的 `session_v2` / `session_message`（及可选 `session_part`）表结构。GGUF 下载需要网络；推理不向远端发送会话文本。索引在本地保留，随源会话删除或回滚在后续同步时清理。
 
 ## AI 驱动工程复现文档 (`doc/`)
 

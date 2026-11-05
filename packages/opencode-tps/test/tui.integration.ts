@@ -129,4 +129,61 @@ test("renders real-time streaming tok/s in prompt footer and settles to exact to
   } as any)
 
   await setup.waitForFrame((frame: string) => frame.includes("75.0 tok/s") && !frame.includes("~50.0 tok/s"))
+
+  // 3. Manual compaction started with inputID at t=4000, delta at t=5000, ended at t=6000 with 100 tokens -> 50.0 tok/s
+  setup.events.emit({
+    id: "evt_000007",
+    type: "session.execution.started",
+    created: 4_000,
+    durable: { aggregateID: sessionID, seq: 6, version: 1 },
+    data: { sessionID },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000008",
+    type: "session.compaction.started",
+    created: 4_000,
+    durable: { aggregateID: sessionID, seq: 7, version: 1 },
+    data: {
+      sessionID,
+      reason: "manual",
+      inputID: "msg_u1",
+    },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000009",
+    type: "session.compaction.delta",
+    created: 5_000,
+    data: {
+      sessionID,
+      text: "b".repeat(190),
+    },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000010",
+    type: "session.compaction.ended",
+    created: 6_000,
+    durable: { aggregateID: sessionID, seq: 8, version: 1 },
+    data: {
+      sessionID,
+      reason: "manual",
+      model: { providerID: "openai", id: "gpt-5" },
+      native: false,
+      text: "b".repeat(380),
+      cost: 0.01,
+      tokens: { input: 200, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000011",
+    type: "session.execution.succeeded",
+    created: 6_000,
+    durable: { aggregateID: sessionID, seq: 9, version: 1 },
+    data: { sessionID },
+  } as any)
+
+  await setup.waitForFrame((frame: string) => frame.includes("50.0 tok/s") && !frame.includes("75.0 tok/s"))
 })

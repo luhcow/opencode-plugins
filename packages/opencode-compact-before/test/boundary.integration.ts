@@ -145,7 +145,12 @@ test("a newly completed checkpoint moves the boundary and a later native compact
   await using setup = await fixture()
   await setup.ready
   await waitForBoundary(setup)
-  const finish = (id: string, text: string, seq: number, beforeID?: string) => {
+  const finish = (
+    id: string,
+    text: string,
+    seq: number,
+    options?: { metadata?: Record<string, unknown>; native?: Record<string, unknown> },
+  ) => {
     setup.events.emit({
       id: `evt_start_${seq}`,
       created: seq,
@@ -159,17 +164,23 @@ test("a newly completed checkpoint moves the boundary and a later native compact
       status: "completed",
       summary: text,
       time: { created: seq + 1 },
-      metadata: beforeID ? { keepID: beforeID, compactBefore: { beforeID, requestID: id } } : undefined,
-    })
+      ...(options?.metadata ? { metadata: options.metadata } : {}),
+      ...(options?.native ? { native: options.native } : {}),
+    } as (typeof setup.messages)[number])
     setup.events.emit({
       id: `evt_end_${seq}`,
       created: seq + 1,
       type: "session.compaction.ended",
       durable: { aggregateID: "ses_boundary_view", seq: String(seq + 1), version: 1 },
-      data: { sessionID: "ses_boundary_view", reason: "manual", text },
+      data: {
+        sessionID: "ses_boundary_view",
+        reason: "manual",
+        text,
+        ...(options?.native ? { native: options.native } : {}),
+      },
     })
   }
-  finish("msg_005", "SECOND_CHECKPOINT_TEXT", 5, "msg_003")
+  finish("msg_005", "SECOND_CHECKPOINT_TEXT", 5, { metadata: { keepID: "msg_003" } })
   await setup.waitForFrame(
     (frame: string) =>
       frame.includes("SECOND_CHECKPOINT_TEXT") &&
@@ -188,6 +199,100 @@ test("a newly completed checkpoint moves the boundary and a later native compact
     (frame: string) => frame.includes("NATIVE_CHECKPOINT_TEXT") && !frame.includes("以上历史已总结"),
   )
   expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_005")).toBeUndefined()
+
+  finish("msg_007", "THIRD_CHECKPOINT_TEXT", 9, {
+    metadata: { keepID: "msg_003", compactBefore: { beforeID: "msg_003", requestID: "msg_007" } },
+  })
+  await setup.waitForFrame(
+    (frame: string) =>
+      frame.includes("THIRD_CHECKPOINT_TEXT") &&
+      frame.includes("以上历史已总结") &&
+      frame.indexOf("THIRD_CHECKPOINT_TEXT") < frame.indexOf("Later retained request"),
+  )
+  expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_007")?.parent?.id).toBe("msg_003")
+
+  finish("msg_008", "", 11, {
+    native: { messages: [{ role: "user", content: "window" }] },
+    metadata: { keepID: "msg_003" },
+  })
+  await setup.waitForFrame(
+    (frame: string) => frame.includes("Provider compaction") && !frame.includes("以上历史已总结"),
+  )
+  expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_007")).toBeUndefined()
+})
+
+test("native summary checkpoint with an assistant keepID renders before the assistant response", async () => {
+  const sessionID = "ses_boundary_assistant"
+  const session = {
+    id: sessionID,
+    title: "Assistant boundary view",
+    projectID: "proj_test",
+    location: { directory: "/project" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, updated: 0 },
+  }
+  const messages = [
+    { id: "msg_001", type: "user", text: "Archived user question", time: { created: 1 } },
+    {
+      id: "msg_assistant",
+      type: "assistant",
+      agent: "build",
+      model: { providerID: "fixture", id: "fixture" },
+      finish: "stop",
+      time: { created: 2, completed: 2.5 },
+      content: [{ type: "text", text: "Kept assistant answer" }],
+    },
+    { id: "msg_003", type: "user", text: "Follow-up question", time: { created: 3 } },
+    {
+      id: "msg_004",
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\nASSISTANT_BOUNDARY_SUMMARY",
+      metadata: { keepID: "msg_assistant" },
+      time: { created: 4 },
+    },
+  ]
+  await using setup = await createAppFixture({
+    width: 120,
+    height: 55,
+    args: { sessionID },
+    config: { animations: false, tabs: { enabled: false }, plugins: [plugin] },
+    fetch: async (url: URL) => {
+      if (url.pathname === "/api/session") return Response.json({ data: [session], cursor: {} })
+      if (url.pathname === `/api/session/${sessionID}`) return Response.json({ data: session })
+      if (url.pathname === `/api/session/${sessionID}/inbox`) return Response.json({ data: [] })
+      if (url.pathname === `/api/session/${sessionID}/message`) {
+        const type = url.searchParams.get("type")
+        const result = type ? messages.filter((message) => message.type === type) : messages
+        return Response.json({ data: [...result].reverse(), cursor: {} })
+      }
+    },
+  })
+  await setup.ready
+  await setup.waitForFrame(
+    (frame: string) =>
+      frame.includes("以上历史已总结") &&
+      frame.includes("ASSISTANT_BOUNDARY_SUMMARY") &&
+      frame.indexOf("ASSISTANT_BOUNDARY_SUMMARY") < frame.indexOf("Kept assistant answer") &&
+      frame.split("ASSISTANT_BOUNDARY_SUMMARY").length === 2,
+  )
+  const row = setup.renderer.root.findDescendantById("msg_assistant")
+  expect(row).toBeDefined()
+  expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_004")?.parent).toBe(row)
+
+  row!.id = "session-part:msg_assistant:text:0"
+  setup.renderer.root.findDescendantById("compact-before-boundary:msg_004")?.destroyRecursively()
+  await setup.renderOnce()
+  await setup.waitForFrame(
+    (frame: string) =>
+      frame.includes("ASSISTANT_BOUNDARY_SUMMARY") &&
+      frame.indexOf("ASSISTANT_BOUNDARY_SUMMARY") < frame.indexOf("Kept assistant answer") &&
+      frame.split("ASSISTANT_BOUNDARY_SUMMARY").length === 2,
+  )
+  expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_004")?.parent?.id).toBe(
+    "session-part:msg_assistant:text:0",
+  )
 })
 
 test("new sessions do not request checkpoints while native optimistic creation is pending", async () => {

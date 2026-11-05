@@ -114,7 +114,7 @@ export default Plugin.define({
       context.data.on("session.compaction.started", (event) => {
         tracker.onStepStarted(
           event.data.sessionID,
-          event.data.inputID ?? "compaction",
+          "compaction",
           event.created,
           event.created,
         )
@@ -126,6 +126,10 @@ export default Plugin.define({
       }),
       context.data.on("session.compaction.ended", (event) => {
         tracker.onStepEnded(event.data.sessionID, "compaction", event.data.tokens, event.created)
+        bump(event.created)
+      }),
+      context.data.on("session.compaction.failed", (event) => {
+        tracker.onStepFailed(event.data.sessionID, "compaction", event.data.tokens, event.created)
         bump(event.created)
       }),
       context.data.on("session.execution.succeeded", (event) => {

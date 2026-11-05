@@ -28,7 +28,7 @@ export interface TpsSnapshot {
 }
 
 interface StepState {
-  readonly id: string
+  id: string
   startedAt: number
   lastEventAt: number
   firstDeltaAt?: number
@@ -37,10 +37,12 @@ interface StepState {
   toolInputEstimatedByCall: Map<string, number>
   exactTokens?: number
   streaming: boolean
+  ended: boolean
 }
 
 interface SessionState {
   running: boolean
+  executionRunning: boolean
   calibration: number
   steps: StepState[]
 }
@@ -158,6 +160,7 @@ export function createTpsTracker() {
     if (!state) {
       state = {
         running: false,
+        executionRunning: false,
         calibration: 1,
         steps: [],
       }
@@ -166,8 +169,40 @@ export function createTpsTracker() {
     return state
   }
 
-  const getOrCreateStep = (state: SessionState, stepID: string, now: number, startedAt?: number): StepState => {
+  const getOrCreateStep = (
+    state: SessionState,
+    stepID: string,
+    now: number,
+    startedAt?: number,
+    isStepStart = false,
+  ): StepState => {
     let step = state.steps.findLast((s) => s.id === stepID)
+    if (step) {
+      const reusable = isStepStart
+        ? !step.ended && step.streaming && step.streamedAt === undefined && step.exactTokens === undefined
+        : !step.ended
+      if (!reusable) {
+        state.steps = state.steps.filter((s) => s.id !== stepID)
+        step = undefined
+      }
+    }
+
+    if (!step && stepID === "compaction" && !isStepStart) {
+      const last = state.steps.at(-1)
+      if (
+        last &&
+        last.streaming &&
+        !last.ended &&
+        last.firstDeltaAt === undefined &&
+        last.rawEstimatedTokens === 0 &&
+        last.exactTokens === undefined &&
+        last.streamedAt === undefined
+      ) {
+        last.id = "compaction"
+        step = last
+      }
+    }
+
     if (!step) {
       // Freeze any earlier open step before starting a new one
       for (const prev of state.steps) {
@@ -183,10 +218,11 @@ export function createTpsTracker() {
         rawEstimatedTokens: 0,
         toolInputEstimatedByCall: new Map(),
         streaming: true,
+        ended: false,
       }
       state.steps.push(step)
     } else {
-      if (startedAt !== undefined && step.firstDeltaAt === undefined) {
+      if (startedAt !== undefined && (step.firstDeltaAt === undefined || startedAt < step.startedAt)) {
         step.startedAt = startedAt
       }
       if (now > step.lastEventAt) {
@@ -200,6 +236,7 @@ export function createTpsTracker() {
     onExecutionStarted(sessionID: string) {
       const state = getOrCreateSession(sessionID)
       state.running = true
+      state.executionRunning = true
       state.steps = []
     },
 
@@ -209,7 +246,7 @@ export function createTpsTracker() {
         state.running = true
         state.steps = []
       }
-      const step = getOrCreateStep(state, assistantMessageID, now, startedAt > 0 ? startedAt : now)
+      const step = getOrCreateStep(state, assistantMessageID, now, startedAt > 0 ? startedAt : now, true)
       step.streaming = true
       step.streamedAt = undefined
     },
@@ -278,6 +315,7 @@ export function createTpsTracker() {
       const step = getOrCreateStep(state, assistantMessageID, endedAt)
       step.streamedAt ??= Math.max(step.startedAt, endedAt)
       step.streaming = false
+      step.ended = true
 
       const exactOut = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
       if (exactOut > 0) {
@@ -286,6 +324,9 @@ export function createTpsTracker() {
           const observedRatio = exactOut / step.rawEstimatedTokens
           state.calibration = clampCalibration(state.calibration * 0.4 + observedRatio * 0.6)
         }
+      }
+      if (!state.executionRunning && !state.steps.some((s) => s.streaming)) {
+        state.running = false
       }
     },
 
@@ -299,11 +340,19 @@ export function createTpsTracker() {
       if (!state) return
       const step = state.steps.findLast((s) => s.id === assistantMessageID) ?? state.steps.at(-1)
       if (!step) return
+      if (assistantMessageID === "compaction" && step.id !== "compaction" && !step.ended) {
+        step.id = "compaction"
+      }
       step.streamedAt ??= Math.max(step.startedAt, endedAt)
       step.streaming = false
+      step.ended = true
       const exactOut = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
       if (exactOut > 0) {
         step.exactTokens = exactOut
+      }
+      if (!state.steps.some((s) => s.streaming)) {
+        state.running = false
+        state.executionRunning = false
       }
     },
 
@@ -311,6 +360,7 @@ export function createTpsTracker() {
       const state = sessions.get(sessionID)
       if (!state) return
       state.running = false
+      state.executionRunning = false
       for (const step of state.steps) {
         if (step.streaming) {
           step.streaming = false
@@ -341,9 +391,31 @@ export function createTpsTracker() {
       const isRunning = sessionRunning ?? state?.running ?? false
 
       // When idle and persisted history has exact turn stats, prefer canonical history
+      // unless the latest tracked activity is a compaction step newer than the last assistant message.
       if (!isRunning && historyMessages && historyMessages.length > 0) {
-        const fromHistory = historyTurnTps(historyMessages, boundaryMessageID)
-        if (fromHistory) return fromHistory
+        const visible = visibleMessages(historyMessages, boundaryMessageID)
+        let lastAssistantTime = -1
+        for (let i = visible.length - 1; i >= 0; i--) {
+          const msg = visible[i]
+          if (msg.type === "assistant") {
+            lastAssistantTime = msg.time?.streamed ?? msg.time?.completed ?? msg.time?.created ?? 0
+            break
+          }
+        }
+        const hasNewerCompaction =
+          !boundaryMessageID &&
+          Boolean(
+            state?.steps.some(
+              (s) =>
+                s.id === "compaction" &&
+                (s.exactTokens ?? s.rawEstimatedTokens) > 0 &&
+                s.startedAt >= lastAssistantTime,
+            ),
+          )
+        if (!hasNewerCompaction) {
+          const fromHistory = historyTurnTps(historyMessages, boundaryMessageID)
+          if (fromHistory) return fromHistory
+        }
       }
 
       if (state && state.steps.length > 0) {

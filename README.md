@@ -16,7 +16,7 @@ OpenCode V2 插件 Monorepo。
 
 ## 安装与配置
 
-开发验证需要 Node.js 22.13+（建议 Node.js 24）、npm 和 OpenCode V2。依赖锁定验证基线为 `@opencode/plugin` 2.2.2 / OpenTUI 0.7.0；使用 TUI 内部节点的插件需要兼容的宿主版本。
+开发验证需要 Node.js 22.13+（建议 Node.js 24）、npm 和 OpenCode V2。依赖锁定验证基线为 `@opencode/plugin` 2.2.5 / OpenTUI 0.8.0（同时兼容 `@opencode/plugin` 2.2.2+ / OpenTUI 0.7+）；使用 TUI 内部节点的插件需要兼容的宿主版本。
 
 ### 从 GitHub 安装
 

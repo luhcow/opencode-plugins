@@ -125,6 +125,10 @@ function createMockHost(config: {
     },
     experimental: {
       generate: {
+        text: async (req: { prompt: string; model: { providerID: string; id: string; variant?: string } }) => {
+          if (!config.onText) throw new Error("unexpected experimental.generate.text call")
+          return await config.onText(req)
+        },
         decisions: async (req: Parameters<NonNullable<typeof config.onDecisions>>[0]) => {
           if (!config.onDecisions) throw new Error("unexpected generate.decisions call")
           return await config.onDecisions(req)
@@ -420,5 +424,55 @@ test("unconfigured primary model automatically inherits conversation model (#low
     event.message ?? "",
     /no reviewer model configured; inheriting conversation model example-provider\/chat-model/,
   )
+  await dispose?.()
+})
+
+test("synchronous reviewer prefers ctx.experimental.generate.text and falls back to ctx.generate.text", async () => {
+  let experimentalCalls = 0
+  let legacyCalls = 0
+  const host = createMockHost({
+    options: {
+      model: "example-provider/chat-model#low",
+      humanFallback: false,
+    },
+  })
+  host.ctx.experimental.generate.text = async () => {
+    experimentalCalls += 1
+    return { text: '{"outcome":"allow"}' }
+  }
+  host.ctx.generate.text = async () => {
+    legacyCalls += 1
+    return { text: '{"outcome":"allow"}' }
+  }
+
+  const dispose = await plugin.setup(host.ctx as never)
+  const firstEvent: PermissionEvent = {
+    sessionID: "ses_1",
+    action: "external_directory",
+    resources: ["/workspace/config/opencode.jsonc"],
+    effect: "ask",
+    source: { type: "tool", id: "t1", messageID: "a1" },
+  }
+
+  await host.evaluate(firstEvent)
+  assert.equal(firstEvent.effect, "allow")
+  assert.equal(experimentalCalls, 1)
+  assert.equal(legacyCalls, 0)
+
+  delete (host.ctx.experimental.generate as { text?: unknown }).text
+
+  const secondEvent: PermissionEvent = {
+    sessionID: "ses_2",
+    action: "external_directory",
+    resources: ["/workspace/config/opencode.jsonc"],
+    effect: "ask",
+    source: { type: "tool", id: "t1", messageID: "a1" },
+  }
+
+  await host.evaluate(secondEvent)
+  assert.equal(secondEvent.effect, "allow")
+  assert.equal(experimentalCalls, 1)
+  assert.equal(legacyCalls, 1)
+
   await dispose?.()
 })

@@ -9,7 +9,7 @@ import {
   type Renderable,
 } from "@opentui/core"
 import { createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js"
-import { errorText } from "../core.ts"
+import { activeCheckpointID, errorText, findCheckpoint, resolveCheckpoint, visibleHistory } from "../core.ts"
 
 type Checkpoint = Extract<SessionMessageInfo, { type: "compaction"; status: "completed" }>
 type Boundary = { sessionID: string; checkpoint: Checkpoint; beforeID: string }
@@ -25,16 +25,31 @@ function timelineRow(node: Renderable, contents: Set<Renderable>): Renderable | 
   return row.parent && contents.has(row.parent) ? row : undefined
 }
 
-/** Native 2.2.x gives text user rows their message ID. Attachment-only rows have no ID;
+/** Native 2.2.x gives text user rows and first assistant rows their message ID, and assistant
+ * part rows `session-part:${messageID}:${partID}`. Attachment-only user rows have no ID;
  * locate those by their ordinal relative to the other user rows in the same mounted timeline. */
-function boundaryRow(context: Context, boundary: Boundary, contents: Set<Renderable>) {
+function boundaryRow(context: Context, boundary: Boundary, contents: Set<Renderable>, nodes: Renderable[]) {
+  const all = context.data.session.message.list(boundary.sessionID)
+  const revertID = context.data.session.get(boundary.sessionID)?.revert?.messageID
+  const messages = visibleHistory(all, revertID)
+  if (
+    messages.length !== all.length &&
+    all.some((message) => message.id === boundary.beforeID) &&
+    !messages.some((message) => message.id === boundary.beforeID)
+  ) {
+    return
+  }
   const direct = context.renderer.root.findDescendantById(boundary.beforeID)
-  if (direct) return direct
-  const users = context.data.session.message.list(boundary.sessionID).filter((message) => message.type === "user")
+  if (direct) return timelineRow(direct, contents) ?? direct
+  const part = nodes.find((node) => node.id.startsWith(`session-part:${boundary.beforeID}:`))
+  if (part) return timelineRow(part, contents) ?? part
+  const users = messages.filter((message) => message.type === "user")
   const index = users.findIndex((message) => message.id === boundary.beforeID)
   if (index < 0) return
+  const nonUsers = new Set(messages.filter((message) => message.type !== "user").map((message) => message.id))
   for (const content of contents) {
     const rows = content.getChildren().filter((row) => {
+      if (row.id.startsWith("session-part:") || nonUsers.has(row.id)) return false
       const body = row.getChildren().find((child) => !child.id.startsWith("compact-before-boundary:"))
       return body instanceof BoxRenderable && Array.isArray(body.border) && body.border.join() === "left"
     })
@@ -66,8 +81,12 @@ function projectBoundary(context: Context, boundary: Boundary) {
 
   const refresh = () => {
     const nodes = [...descendants(renderer.root)]
-    const contents = new Set(nodes.filter((node) => node instanceof ScrollBoxRenderable).map((node) => node.content))
-    const target = boundaryRow(context, boundary, contents)
+    const contents = new Set<Renderable>(
+      nodes
+        .filter((node) => node instanceof ScrollBoxRenderable)
+        .map((node) => (node.content instanceof BoxRenderable ? node.content : node)),
+    )
+    const target = boundaryRow(context, boundary, contents, nodes)
     if (view?.isDestroyed) view = undefined
     if (view && view.parent !== target) {
       view.destroyRecursively()
@@ -112,22 +131,36 @@ function projectBoundary(context: Context, boundary: Boundary) {
       target.add(view, 0)
     }
 
+    const replaced = Boolean(target && view && !view.isDestroyed && view.parent === target)
     // Compaction rows have no message ID in 2.2.x. Identify the native summary by its
-    // Markdown body and Compaction heading; the plugin's copy lives inside the user row.
-    const originals = nodes.flatMap((node) => {
-      if (!(node instanceof MarkdownRenderable) || node.content !== boundary.checkpoint.summary.trim()) return []
-      const row = timelineRow(node, contents)
-      if (!row || row === target) return []
-      return [...descendants(row)].some((child) => child instanceof TextRenderable && child.plainText === "Compaction")
-        ? [row]
-        : []
-    })
+    // Markdown body and Compaction heading; the plugin's copy lives inside the target row.
+    const originals = replaced
+      ? nodes.flatMap((node) => {
+          if (!(node instanceof MarkdownRenderable) || node.content !== boundary.checkpoint.summary.trim()) return []
+          const row = timelineRow(node, contents)
+          if (!row || row === target) return []
+          return [...descendants(row)].some(
+            (child) => child instanceof TextRenderable && child.plainText === "Compaction",
+          )
+            ? [row]
+            : []
+        })
+      : []
     const original = originals.at(-1)
-    if (original && !hidden.has(original)) {
+    for (const [row, visible] of hidden) {
+      if (row.isDestroyed) {
+        hidden.delete(row)
+        continue
+      }
+      if (!replaced || row !== original) {
+        row.visible = visible
+        hidden.delete(row)
+      }
+    }
+    if (replaced && original && !hidden.has(original)) {
       hidden.set(original, original.visible)
       original.visible = false
     }
-    for (const row of hidden.keys()) if (row.isDestroyed) hidden.delete(row)
   }
 
   renderer.on("frame", refresh)
@@ -148,11 +181,13 @@ export function installBoundaryView(context: Context) {
       // New routes include optimistic sessions that do not exist on the server yet.
       // Follow native timeline hydration; only a completed checkpoint needs a boundary view.
       const checkpointID = createMemo(() => {
+        revision()
         const route = context.ui.router.current()
         if (route.type !== "session") return
-        return context.data.session.message
-          .list(route.sessionID)
-          .findLast((message) => message.type === "compaction" && message.status === "completed")?.id
+        return activeCheckpointID(
+          context.data.session.message.list(route.sessionID),
+          context.data.session.get(route.sessionID)?.revert?.messageID,
+        )
       })
       const [boundary] = createResource(
         () => {
@@ -168,13 +203,16 @@ export function installBoundaryView(context: Context) {
             const page = await context.client.message.list(
               cursor ? { sessionID, type: "compaction", cursor } : { sessionID, type: "compaction", order: "desc" },
             )
-            const checkpoint = page.data.find(
-              (message): message is Checkpoint => message.type === "compaction" && message.status === "completed",
+            const checkpoint = findCheckpoint(
+              page.data.filter(
+                (message): message is Checkpoint => message.type === "compaction" && message.status === "completed",
+              ),
+              checkpointID,
             )
             if (checkpoint) {
-              const beforeID = checkpoint.metadata?.keepID
-              return checkpoint.metadata?.compactBefore && typeof beforeID === "string"
-                ? { sessionID, checkpoint, beforeID }
+              const resolved = resolveCheckpoint(checkpoint)
+              return resolved?.kind === "boundary"
+                ? { sessionID, checkpoint, beforeID: resolved.beforeID }
                 : undefined
             }
             if (!page.data.length) return
@@ -182,12 +220,18 @@ export function installBoundaryView(context: Context) {
           } while (cursor)
         },
       )
-      const stops = (["session.compaction.ended", "session.revert.committed", "session.revert.cleared"] as const).map(
-        (type) =>
-          context.data.on(type, (event) => {
-            const route = context.ui.router.current()
-            if (route.type === "session" && route.sessionID === event.data.sessionID) update((value) => value + 1)
-          }),
+      const stops = (
+        [
+          "session.compaction.ended",
+          "session.revert.staged",
+          "session.revert.committed",
+          "session.revert.cleared",
+        ] as const
+      ).map((type) =>
+        context.data.on(type, (event) => {
+          const route = context.ui.router.current()
+          if (route.type === "session" && route.sessionID === event.data.sessionID) update((value) => value + 1)
+        }),
       )
       onCleanup(() => stops.forEach((stop) => stop()))
       createEffect(() => {

@@ -116,3 +116,114 @@ test("historyTurnTps matches multi-step turn weighting and respects revert bound
   assert.equal(reverted.tps, 50)
   assert.equal(reverted.tokens, 200)
 })
+
+test("manual compaction preserves started timestamp across delta and ended events", () => {
+  const tracker = createTpsTracker()
+  const sessionID = "ses_compact_manual"
+  const priorHistory: HistoryMessageLike[] = [
+    { id: "msg_u1", type: "user", time: { created: 100 } },
+    {
+      id: "msg_a1",
+      type: "assistant",
+      time: { created: 100, streamed: 600, completed: 600 },
+      tokens: { output: 50, reasoning: 0 },
+    },
+    { id: "msg_idle1", type: "idle", time: { created: 600 } },
+  ]
+
+  tracker.onExecutionStarted(sessionID)
+  // Even if compaction.started carries an inputID (or "compaction"), delta and ended use "compaction"
+  tracker.onStepStarted(sessionID, "msg_compact_input", 1_000, 1_000)
+  tracker.onDelta(sessionID, "compaction", "a".repeat(190), 2_000)
+
+  const mid = tracker.getSnapshot(sessionID, 2_000, priorHistory, undefined, true)
+  assert.ok(mid)
+  assert.equal(mid.streaming, true)
+  assert.equal(mid.exact, false)
+  assert.equal(mid.durationMs, 1_000)
+  assert.ok(Math.abs(mid.tps - 50) < 1)
+
+  tracker.onStepEnded(sessionID, "compaction", { input: 500, output: 100, reasoning: 0 }, 3_000)
+  tracker.onExecutionFinished(sessionID, 3_000)
+
+  const finalSnap = tracker.getSnapshot(sessionID, 3_500, priorHistory, undefined, false)
+  assert.ok(finalSnap)
+  assert.equal(finalSnap.tokens, 100)
+  assert.equal(finalSnap.durationMs, 2_000)
+  assert.equal(finalSnap.tps, 50)
+  assert.equal(finalSnap.streaming, false)
+  assert.equal(finalSnap.exact, true)
+  assert.equal(formatTpsLabel(finalSnap), "50.0 tok/s")
+})
+
+test("consecutive compactions in the same session reset step timing and tokens cleanly", () => {
+  const tracker = createTpsTracker()
+  const sessionID = "ses_compact_consecutive"
+
+  // First compaction: 100 tokens over 2000ms (1000 -> 3000) = 50 tok/s
+  tracker.onStepStarted(sessionID, "compaction", 1_000, 1_000)
+  tracker.onDelta(sessionID, "compaction", "a".repeat(380), 2_000)
+  tracker.onStepEnded(sessionID, "compaction", { input: 400, output: 100, reasoning: 0 }, 3_000)
+
+  const firstSnap = tracker.getSnapshot(sessionID, 3_000)
+  assert.ok(firstSnap)
+  assert.equal(firstSnap.tokens, 100)
+  assert.equal(firstSnap.durationMs, 2_000)
+  assert.equal(firstSnap.tps, 50)
+  assert.equal(firstSnap.streaming, false)
+  assert.equal(firstSnap.exact, true)
+
+  // Second compaction starts at t=5000 without reusing the first compaction's startedAt or exactTokens
+  tracker.onStepStarted(sessionID, "compaction", 5_000, 5_000)
+  assert.equal(tracker.hasActiveStream(sessionID), true)
+  assert.equal(tracker.getSnapshot(sessionID, 5_200), undefined)
+
+  tracker.onDelta(sessionID, "compaction", "b".repeat(380), 6_000)
+  const secondMid = tracker.getSnapshot(sessionID, 6_000)
+  assert.ok(secondMid)
+  assert.equal(secondMid.streaming, true)
+  assert.equal(secondMid.exact, false)
+  assert.equal(secondMid.durationMs, 1_000)
+
+  tracker.onStepEnded(sessionID, "compaction", { input: 600, output: 160, reasoning: 0 }, 7_000)
+  const secondSnap = tracker.getSnapshot(sessionID, 7_000)
+  assert.ok(secondSnap)
+  assert.equal(secondSnap.tokens, 160)
+  assert.equal(secondSnap.durationMs, 2_000)
+  assert.equal(secondSnap.tps, 80)
+  assert.equal(secondSnap.streaming, false)
+  assert.equal(secondSnap.exact, true)
+})
+
+test("failed compaction and zero-output native compaction stop streaming without bogus tps", () => {
+  const tracker = createTpsTracker()
+  const sessionID = "ses_compact_failed"
+
+  // 1. Failed compaction with partial token usage
+  tracker.onExecutionStarted(sessionID)
+  tracker.onStepStarted(sessionID, "compaction", 1_000, 1_000)
+  tracker.onDelta(sessionID, "compaction", "a".repeat(190), 2_000)
+  assert.equal(tracker.hasActiveStream(sessionID), true)
+
+  tracker.onStepFailed(sessionID, "compaction", { input: 300, output: 40, reasoning: 0 }, 3_000)
+  assert.equal(tracker.hasActiveStream(sessionID), false)
+
+  const failedSnap = tracker.getSnapshot(sessionID, 3_000)
+  assert.ok(failedSnap)
+  assert.equal(failedSnap.tokens, 40)
+  assert.equal(failedSnap.durationMs, 2_000)
+  assert.equal(failedSnap.tps, 20)
+  assert.equal(failedSnap.streaming, false)
+  assert.equal(failedSnap.exact, true)
+
+  // 2. Provider-native compaction with 0 output tokens and no deltas
+  const nativeSessionID = "ses_compact_native"
+  tracker.onExecutionStarted(nativeSessionID)
+  tracker.onStepStarted(nativeSessionID, "compaction", 4_000, 4_000)
+  assert.equal(tracker.hasActiveStream(nativeSessionID), true)
+  tracker.onStepEnded(nativeSessionID, "compaction", { input: 2_000, output: 0, reasoning: 0 }, 5_000)
+  tracker.onExecutionFinished(nativeSessionID, 5_000)
+
+  assert.equal(tracker.hasActiveStream(nativeSessionID), false)
+  assert.equal(tracker.getSnapshot(nativeSessionID, 5_000), undefined)
+})

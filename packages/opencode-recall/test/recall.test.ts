@@ -148,6 +148,95 @@ function createMockOpencodeDb() {
     )
   }
 
+  const enableSessionPartTable = () => {
+    ocDb.exec(`
+      CREATE TABLE IF NOT EXISTS session_part (
+        message_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        call_id TEXT,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        CONSTRAINT session_part_pk PRIMARY KEY(message_id, ordinal)
+      );
+      CREATE INDEX IF NOT EXISTS session_part_session_message_idx
+        ON session_part (session_id, message_id, ordinal);
+    `)
+  }
+
+  const addPartTurn = (input: {
+    sessionID: string
+    turnNumber: number
+    userMessageID?: string
+    assistantMessageID?: string
+    userSeq?: number
+    assistantSeq?: number
+    userText: string
+    parts: ReadonlyArray<{
+      ordinal?: number
+      type: string
+      callID?: string | null
+      timeCreated?: number
+      timeUpdated?: number
+      data: Record<string, unknown>
+    }>
+    inlineAssistantContent?: ReadonlyArray<Record<string, unknown>>
+  }) => {
+    enableSessionPartTable()
+    const uSeq = input.userSeq ?? input.turnNumber * 2 - 1
+    const aSeq = input.assistantSeq ?? input.turnNumber * 2
+    const uId = input.userMessageID ?? `msg_${input.sessionID}_u_${input.turnNumber}`
+    const aId = input.assistantMessageID ?? `msg_${input.sessionID}_a_${input.turnNumber}`
+    const ts = 1761391200000 + input.turnNumber * 60_000
+
+    insertMessageStmt.run(
+      uId,
+      input.sessionID,
+      "user",
+      uSeq,
+      ts,
+      ts,
+      JSON.stringify({ text: input.userText, time: { created: ts } }),
+    )
+
+    insertMessageStmt.run(
+      aId,
+      input.sessionID,
+      "assistant",
+      aSeq,
+      ts + 1000,
+      ts + 1000,
+      JSON.stringify({
+        content: input.inlineAssistantContent ?? [],
+        time: { created: ts + 1000, completed: ts + 2000 },
+      }),
+    )
+
+    const insertPartStmt = ocDb.prepare(`
+      INSERT INTO session_part (
+        message_id, session_id, ordinal, type, call_id, time_created, time_updated, data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+
+    input.parts.forEach((p, idx) => {
+      const ord = p.ordinal ?? idx
+      const pCreated = p.timeCreated ?? ts + 1000 + ord * 10
+      const pUpdated = p.timeUpdated ?? pCreated
+      insertPartStmt.run(
+        aId,
+        input.sessionID,
+        ord,
+        p.type,
+        p.callID ?? null,
+        pCreated,
+        pUpdated,
+        JSON.stringify(p.data),
+      )
+    })
+  }
+
   const setRevert = (sessionID: string, messageID: string | null) => {
     ocDb
       .prepare("UPDATE session_v2 SET revert = ? WHERE id = ?")
@@ -164,6 +253,20 @@ function createMockOpencodeDb() {
       .prepare("SELECT seq FROM session_message WHERE session_id = ? AND id = ?")
       .get(sessionID, parsed.messageID) as { seq: number } | undefined
     if (msgRow) {
+      const hasPartTable = ocDb
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part' LIMIT 1")
+        .get()
+      if (hasPartTable) {
+        ocDb
+          .prepare(
+            `DELETE FROM session_part
+             WHERE session_id = ?
+               AND message_id IN (
+                 SELECT id FROM session_message WHERE session_id = ? AND seq >= ?
+               )`,
+          )
+          .run(sessionID, sessionID, msgRow.seq)
+      }
       ocDb
         .prepare("DELETE FROM session_message WHERE session_id = ? AND seq >= ?")
         .run(sessionID, msgRow.seq)
@@ -187,6 +290,8 @@ function createMockOpencodeDb() {
     ocDb,
     addSession,
     addTurn,
+    enableSessionPartTable,
+    addPartTurn,
     setRevert,
     commitRevert,
     cleanup,
@@ -1447,6 +1552,379 @@ test("Test 8: Search result truncation (User 50 chars / Assistant 100 chars) and
     )
     assert.equal(remaining.length, 0, "Shared instance must be removed after last workspace disposes")
   } finally {
+    env.cleanup()
+  }
+})
+
+test("Test 9: OpenCode 2.2.1+ session_part compatibility (part-only, mixed inline+part, ordinal ordering, inline->part migration with 0 re-embeddings, and same-length part edits)", async () => {
+  const env = createMockOpencodeDb()
+  const tracked = createTrackedEmbedder()
+  const db = new RecallDatabase({
+    dbPath: env.recallDbPath,
+    opencodeDbPath: env.opencodeDbPath,
+  })
+  const indexer = new RecallIndexer({
+    db,
+    embedder: tracked.embedder,
+  })
+
+  try {
+    // Phase 1: Start BEFORE `session_part` table exists (simulating OpenCode 2.2.0)
+    assert.equal(db.hasSessionPartTable(), false)
+
+    env.addSession({
+      id: "ses_migrate",
+      projectID: "proj_part",
+      directory: join(env.dir, "part-project"),
+      title: "Inline to SessionPart Migration",
+    })
+    env.addTurn({
+      sessionID: "ses_migrate",
+      turnNumber: 1,
+      userText: "How does redis cluster handle sentinel quorum?",
+      assistantText: "Redis cluster uses gossip while sentinel uses quorum voting.",
+      reasoningText: "Thinking about sentinel vs cluster",
+    })
+
+    const syncInline = await indexer.syncPendingSessions()
+    assert.equal(syncInline.embeddedCount, 1)
+    assert.equal(db.getTurnCount(), 1)
+    assert.equal(db.getEmbeddingCount(), 1)
+    assert.equal(tracked.acquireCount, 1)
+
+    // Phase 2: Migrate `oc` while attached by creating `session_part` and moving Turn 1's assistant content into `session_part`
+    // while setting `session_message.data.content` to `[]` (simulating OpenCode 2.2.1+ migration / rewrite).
+    env.enableSessionPartTable()
+    assert.equal(db.hasSessionPartTable(), true)
+
+    const ts1 = 1761391261000
+    env.ocDb
+      .prepare(
+        `INSERT INTO session_part (message_id, session_id, ordinal, type, call_id, time_created, time_updated, data)
+         VALUES (?, 'ses_migrate', ?, ?, NULL, ?, ?, ?)`,
+      )
+      .run(
+        "msg_ses_migrate_a_1",
+        0,
+        "reasoning",
+        ts1,
+        ts1,
+        JSON.stringify({ type: "reasoning", text: "Thinking about sentinel vs cluster" }),
+      )
+    env.ocDb
+      .prepare(
+        `INSERT INTO session_part (message_id, session_id, ordinal, type, call_id, time_created, time_updated, data)
+         VALUES (?, 'ses_migrate', ?, ?, NULL, ?, ?, ?)`,
+      )
+      .run(
+        "msg_ses_migrate_a_1",
+        1,
+        "text",
+        ts1 + 10,
+        ts1 + 10,
+        JSON.stringify({ type: "text", text: "Redis cluster uses gossip while sentinel uses quorum voting." }),
+      )
+    env.ocDb
+      .prepare("UPDATE session_message SET data = ? WHERE id = 'msg_ses_migrate_a_1'")
+      .run(JSON.stringify({ content: [], time: { created: ts1, completed: ts1 + 1000 } }))
+
+    tracked.resetCounters()
+    const syncAfterMigration = await indexer.syncPendingSessions()
+    assert.equal(
+      syncAfterMigration.reconciled.deletedTurns,
+      0,
+      "Migrated turn MUST NOT be deleted when inline content moves to session_part",
+    )
+    assert.equal(
+      syncAfterMigration.reconciled.deletedEmbeddings,
+      0,
+      "Existing embedding MUST NOT be deleted when content_hash is unchanged",
+    )
+    assert.equal(
+      syncAfterMigration.embeddedCount,
+      0,
+      "Migrated turn with identical text MUST NOT be re-embedded",
+    )
+    assert.equal(
+      tracked.acquireCount,
+      0,
+      "GPU embedder must NOT be acquired when migrating inline message to session_part with unchanged text",
+    )
+    assert.equal(db.getTurnCount(), 1)
+    assert.equal(db.getEmbeddingCount(), 1)
+
+    // Verify a subsequent reconcile is a complete no-op (`upsertedTurns === 0`, fingerprint stabilized)
+    const reconcileNoop = db.reconcileTurns()
+    assert.equal(reconcileNoop.deletedTurns, 0)
+    assert.equal(reconcileNoop.upsertedTurns, 0, "Fingerprint in oc_bounds must match updated_at in session_turns")
+    assert.equal(reconcileNoop.missingEmbeddingCount, 0)
+
+    // Phase 3: Mixed session (Turn 1 inline without session_part rows + Turn 2 stored in session_part with multiple ordinals and stale inline content)
+    env.addSession({
+      id: "ses_mixed",
+      projectID: "proj_part",
+      directory: join(env.dir, "part-project"),
+      title: "Mixed Inline and Multi-Part Session",
+    })
+    env.addTurn({
+      sessionID: "ses_mixed",
+      turnNumber: 1,
+      userText: "Question turn1 about sqlite wal",
+      assistantText: "Inline answer turn1 about sqlite wal",
+    })
+    // Insert parts out of order (ordinal 2, then 0, then 1) and include stale inline content to verify:
+    // 1. `session_part` takes precedence over inline `session_message.data.content`
+    // 2. Parts are ordered by `ordinal ASC`
+    // 3. Non-text parts (`reasoning`, `tool_use`) are ignored
+    env.addPartTurn({
+      sessionID: "ses_mixed",
+      turnNumber: 2,
+      userText: "Question turn2 about llama metal gpu",
+      inlineAssistantContent: [{ type: "text", text: "STALE_INLINE_TEXT_THAT_MUST_BE_IGNORED" }],
+      parts: [
+        {
+          ordinal: 2,
+          type: "text",
+          data: { type: "text", text: "Second part about metal gpu." },
+        },
+        {
+          ordinal: 0,
+          type: "reasoning",
+          data: { type: "reasoning", text: "REASONING_PART_THAT_MUST_BE_IGNORED" },
+        },
+        {
+          ordinal: 1,
+          type: "text",
+          data: { text: "First part about llama." },
+        },
+        {
+          ordinal: 3,
+          type: "tool_use",
+          callID: "call_1",
+          data: { type: "tool_use", name: "bash" },
+        },
+      ],
+    })
+
+    tracked.resetCounters()
+    const syncMixed = await indexer.syncPendingSessions()
+    assert.equal(syncMixed.embeddedCount, 2)
+    assert.equal(db.getTurnCount(), 3)
+
+    const turn2Row = db.db
+      .prepare(
+        "SELECT assistant_text FROM main.session_turns WHERE session_id = 'ses_mixed' AND turn_index = 2",
+      )
+      .get() as { assistant_text: string }
+    assert.equal(
+      turn2Row.assistant_text,
+      "First part about llama.\nSecond part about metal gpu.",
+      "Parts must be joined in ordinal ASC order and override stale inline content",
+    )
+
+    // Verify subsequent reconcile is a no-op
+    assert.equal(db.reconcileTurns().upsertedTurns, 0)
+
+    // Phase 4: Same-length text edit inside `session_part` with higher `time_updated` (while `session_message` envelope is unchanged!)
+    // Change "First part about llama." (23 chars) -> "First part about alpha." (23 chars, exact same byte/char length!)
+    const newUpdatedTs = 1761399999000
+    env.ocDb
+      .prepare(
+        `UPDATE session_part
+         SET data = ?, time_updated = ?
+         WHERE session_id = 'ses_mixed' AND message_id = 'msg_ses_mixed_a_2' AND ordinal = 1`,
+      )
+      .run(JSON.stringify({ text: "First part about alpha." }), newUpdatedTs)
+
+    tracked.resetCounters()
+    const syncAfterSameLenEdit = await indexer.syncPendingSessions()
+    assert.equal(
+      syncAfterSameLenEdit.reconciled.upsertedTurns,
+      1,
+      "Same-length edit in session_part with higher time_updated must be detected as dirty",
+    )
+    assert.equal(
+      syncAfterSameLenEdit.embeddedCount,
+      1,
+      "Updated turn text in session_part must be re-embedded",
+    )
+    assert.equal(
+      syncAfterSameLenEdit.reconciled.deletedEmbeddings,
+      1,
+      "Old orphan embedding from before the edit must be cleaned up",
+    )
+
+    const searchAlpha = await indexer.searchSessions({
+      query: "alpha metal gpu",
+      scope: "project",
+      projectID: "proj_part",
+      limit: 5,
+    })
+    assert.equal(searchAlpha.items[0]?.sessions[0]?.sessionID, "ses_mixed")
+    assert.equal(searchAlpha.items[0]?.sessions[0]?.turnIndex, 2)
+    assert.match(searchAlpha.items[0]?.assistantText ?? "", /^First part about alpha\./)
+  } finally {
+    await indexer.dispose()
+    env.cleanup()
+  }
+})
+
+test("Test 10: Revert, Fork deduplication, and in-place streaming completion with session_part", async () => {
+  const env = createMockOpencodeDb()
+  env.enableSessionPartTable()
+  const tracked = createTrackedEmbedder()
+  const db = new RecallDatabase({
+    dbPath: env.recallDbPath,
+    opencodeDbPath: env.opencodeDbPath,
+  })
+  const indexer = new RecallIndexer({
+    db,
+    embedder: tracked.embedder,
+  })
+
+  try {
+    env.addSession({
+      id: "ses_part_src",
+      projectID: "proj_pf",
+      directory: join(env.dir, "pf"),
+      title: "SessionPart Source",
+      timeCreated: 1761391200000,
+    })
+
+    for (let t = 1; t <= 3; t++) {
+      env.addPartTurn({
+        sessionID: "ses_part_src",
+        turnNumber: t,
+        userMessageID: `msg_psrc_u_${t}`,
+        assistantMessageID: `msg_psrc_a_${t}`,
+        userText: `Question for turn${t} in part source`,
+        parts: [
+          {
+            ordinal: 0,
+            type: "text",
+            data: {
+              type: "text",
+              text:
+                t === 2
+                  ? "Answer for turn2 with dsp bidder experiment."
+                  : `Answer for turn${t} in part source.`,
+            },
+          },
+        ],
+      })
+    }
+
+    const sync1 = await indexer.syncPendingSessions()
+    assert.equal(sync1.embeddedCount, 3)
+    assert.equal(db.getTurnCount(), 3)
+    assert.equal(db.getEmbeddingCount(), 3)
+
+    // Fork `ses_part_src` into `ses_part_fork` (where fork turns are stored in `session_part`)
+    env.addSession({
+      id: "ses_part_fork",
+      projectID: "proj_pf",
+      forkSessionID: "ses_part_src",
+      directory: join(env.dir, "pf"),
+      title: "SessionPart Fork",
+      timeCreated: 1761392000000,
+    })
+    for (let t = 1; t <= 2; t++) {
+      env.addPartTurn({
+        sessionID: "ses_part_fork",
+        turnNumber: t,
+        userMessageID: `msg_pfork_u_${t}`,
+        assistantMessageID: `msg_pfork_a_${t}`,
+        userText: `Question for turn${t} in part source`,
+        parts: [
+          {
+            ordinal: 0,
+            type: "text",
+            data: {
+              type: "text",
+              text:
+                t === 2
+                  ? "Answer for turn2 with dsp bidder experiment."
+                  : `Answer for turn${t} in part source.`,
+            },
+          },
+        ],
+      })
+    }
+
+    tracked.resetCounters()
+    const syncFork = await indexer.syncPendingSessions()
+    assert.equal(syncFork.reconciled.upsertedTurns, 2)
+    assert.equal(syncFork.embeddedCount, 0, "Cloned session_part turns in fork must reuse existing embeddings")
+    assert.equal(tracked.acquireCount, 0)
+    assert.equal(db.getTurnCount(), 5)
+    assert.equal(db.getEmbeddingCount(), 3)
+
+    // Staged revert on `ses_part_src` to turn 2 (`msg_psrc_u_2`): invalidates turns 2 and 3 in `ses_part_src`,
+    // while `ses_part_fork` retains turn 2's embedding and turn 3's orphan embedding is deleted.
+    env.setRevert("ses_part_src", "msg_psrc_u_2")
+    const syncRevert = await indexer.syncPendingSessions()
+    assert.equal(syncRevert.reconciled.deletedTurns, 2, "Turns 2 and 3 in ses_part_src must be deleted on revert")
+    assert.equal(
+      syncRevert.reconciled.deletedEmbeddings,
+      1,
+      "Turn 3 embedding is deleted while Turn 2 embedding survives via ses_part_fork",
+    )
+    assert.equal(db.getTurnCount(), 3) // turn 1 in src + turns 1..2 in fork
+    assert.equal(db.getEmbeddingCount(), 2)
+
+    // Commit revert on `ses_part_src` and simulate an in-progress streaming turn (initially tool_use part only, then text part appended)
+    env.commitRevert("ses_part_src")
+    env.addPartTurn({
+      sessionID: "ses_part_src",
+      turnNumber: 4,
+      userSeq: 3,
+      assistantSeq: 4,
+      userMessageID: "msg_psrc_u_4",
+      assistantMessageID: "msg_psrc_a_4",
+      userText: "How to tune omega sentinel in production?",
+      parts: [
+        {
+          ordinal: 0,
+          type: "tool_use",
+          callID: "call_grep",
+          data: { type: "tool_use", name: "grep" },
+        },
+      ],
+    })
+
+    const syncStreamingToolOnly = await indexer.syncPendingSessions()
+    assert.equal(syncStreamingToolOnly.embeddedCount, 0, "Tool-only session_part turn is not indexed until text part arrives")
+    assert.equal(db.getTurnCount(), 3)
+
+    // Now append ordinal=1 text part in `session_part` without modifying `session_message` row at all!
+    const tsComplete = 1761395000000
+    env.ocDb
+      .prepare(
+        `INSERT INTO session_part (message_id, session_id, ordinal, type, call_id, time_created, time_updated, data)
+         VALUES ('msg_psrc_a_4', 'ses_part_src', 1, 'text', NULL, ?, ?, ?)`,
+      )
+      .run(
+        tsComplete,
+        tsComplete,
+        JSON.stringify({ type: "text", text: "Tune omega sentinel quorum and failover timeout." }),
+      )
+
+    const searchAfterPartAppended = await indexer.searchSessions({
+      query: "omega sentinel",
+      scope: "project",
+      projectID: "proj_pf",
+      limit: 5,
+    })
+    assert.equal(
+      searchAfterPartAppended.syncedTurns,
+      1,
+      "Appending text part in session_part (even without touching session_message) must trigger sync",
+    )
+    assert.equal(searchAfterPartAppended.items[0]?.sessions[0]?.sessionID, "ses_part_src")
+    assert.equal(searchAfterPartAppended.items[0]?.sessions[0]?.userMessageID, "msg_psrc_u_4")
+    assert.equal(searchAfterPartAppended.items[0]?.sessions[0]?.turnIndex, 2)
+  } finally {
+    await indexer.dispose()
     env.cleanup()
   }
 })

@@ -191,7 +191,16 @@ export function extractAssistantText(rawData: string): string {
   return ""
 }
 
-interface RawMessageRow {
+export interface RawSessionPartRow {
+  message_id?: string
+  ordinal?: number
+  type?: string
+  time_updated?: number
+  data_len?: number
+  data: string
+}
+
+export interface RawMessageRow {
   session_id: string
   id: string
   type: string
@@ -199,6 +208,40 @@ interface RawMessageRow {
   time_updated?: number
   data_len?: number
   data: string
+  parts?: readonly RawSessionPartRow[]
+}
+
+export function extractAssistantTextFromParts(parts: readonly RawSessionPartRow[]): string {
+  if (parts.length === 0) return ""
+  let ordered = parts
+  for (let i = 1; i < parts.length; i++) {
+    if ((parts[i]!.ordinal ?? i) < (parts[i - 1]!.ordinal ?? i - 1)) {
+      ordered = [...parts].sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))
+      break
+    }
+  }
+  const texts: string[] = []
+  for (const part of ordered) {
+    try {
+      const parsed = JSON.parse(part.data) as {
+        type?: unknown
+        text?: unknown
+      }
+      if (!parsed || typeof parsed !== "object") continue
+      const parsedType = typeof parsed.type === "string" ? parsed.type : undefined
+      const rowType = typeof part.type === "string" && part.type.length > 0 ? part.type : undefined
+      const isTextPart =
+        (rowType === "text" && (parsedType === undefined || parsedType === "text")) ||
+        (rowType === undefined && parsedType === "text")
+      if (isTextPart && typeof parsed.text === "string") {
+        const text = parsed.text.trim()
+        if (text) texts.push(text)
+      }
+    } catch {
+      // Ignore malformed JSON
+    }
+  }
+  return texts.join("\n").trim()
 }
 
 export function groupMessagesIntoTurns(rows: readonly RawMessageRow[]): ExtractedTurn[] {
@@ -210,6 +253,9 @@ export function groupMessagesIntoTurns(rows: readonly RawMessageRow[]): Extracte
   let sessionMaxUpdatedAt = 0
   let sessionDataLenSum = 0
   let sessionMsgCount = 0
+  let sessionPartDataLenSum = 0
+  let sessionPartCount = 0
+  let sessionPartTimeModSum = 0
   let pendingUserMessageID: string | null = null
   let pendingUserSeq = 0
   let pendingEndSeq = 0
@@ -258,7 +304,12 @@ export function groupMessagesIntoTurns(rows: readonly RawMessageRow[]): Extracte
           lastTurn.endSeq = sessionMaxSeq
         }
         lastTurn.updatedAt =
-          sessionMaxUpdatedAt + sessionDataLenSum * 31 + sessionMsgCount * 17
+          sessionMaxUpdatedAt +
+          sessionDataLenSum * 31 +
+          sessionMsgCount * 17 +
+          sessionPartDataLenSum * 37 +
+          sessionPartCount * 13 +
+          sessionPartTimeModSum
       }
     }
   }
@@ -273,6 +324,9 @@ export function groupMessagesIntoTurns(rows: readonly RawMessageRow[]): Extracte
       sessionMaxUpdatedAt = 0
       sessionDataLenSum = 0
       sessionMsgCount = 0
+      sessionPartDataLenSum = 0
+      sessionPartCount = 0
+      sessionPartTimeModSum = 0
     }
     if (row.seq > sessionMaxSeq) {
       sessionMaxSeq = row.seq
@@ -283,6 +337,18 @@ export function groupMessagesIntoTurns(rows: readonly RawMessageRow[]): Extracte
     }
     sessionDataLenSum += Number(row.data_len ?? row.data.length)
     sessionMsgCount += 1
+
+    if (row.type === "assistant" && row.parts && row.parts.length > 0) {
+      for (const part of row.parts) {
+        const partUpdated = Number(part.time_updated ?? 0)
+        if (partUpdated > sessionMaxUpdatedAt) {
+          sessionMaxUpdatedAt = partUpdated
+        }
+        sessionPartDataLenSum += Number(part.data_len ?? part.data.length)
+        sessionPartCount += 1
+        sessionPartTimeModSum += partUpdated % 1000000000
+      }
+    }
 
     if (row.type === "user") {
       flushPendingTurn()
@@ -296,7 +362,10 @@ export function groupMessagesIntoTurns(rows: readonly RawMessageRow[]): Extracte
     } else if (row.type === "assistant") {
       if (pendingUserMessageID !== null && pendingUserText.length > 0) {
         pendingEndSeq = row.seq
-        const assistantText = extractAssistantText(row.data)
+        const assistantText =
+          row.parts && row.parts.length > 0
+            ? extractAssistantTextFromParts(row.parts)
+            : extractAssistantText(row.data)
         if (assistantText.length > 0) {
           pendingAssistantTexts.push(assistantText)
           lastAssistantMessageID = row.id
@@ -396,8 +465,18 @@ export class RecallDatabase {
     }
   }
 
+  hasSessionPartTable(): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 AS present FROM oc.sqlite_master WHERE type = 'table' AND name = 'session_part' LIMIT 1",
+      )
+      .get() as { present?: number } | undefined
+    return row?.present === 1
+  }
+
   /**
-   * Executes the cross-DB reconciliation pipeline against `oc.session_v2` and `oc.session_message`:
+   * Executes the cross-DB reconciliation pipeline against `oc.session_v2`, `oc.session_message`,
+   * and (when present in OpenCode 2.2.1+) `oc.session_part`:
    * 1. Delete stale/reverted turns in `main.session_turns`.
    * 2. Upsert completed `(user, assistant)` turns from `oc` into `main.session_turns` (including running sessions' completed history).
    * 3. Delete orphan embeddings in `main.embeddings` no longer referenced by any row in `main.session_turns`.
@@ -405,6 +484,7 @@ export class RecallDatabase {
    */
   reconcileTurns(options: ReconcileOptions = {}): ReconcileSummary {
     const excludeSessionID = options.excludeSessionID ?? null
+    const hasSessionPart = this.hasSessionPartTable()
 
     this.db.exec("BEGIN IMMEDIATE")
     try {
@@ -460,9 +540,85 @@ export class RecallDatabase {
       const invalidatedSessions = new Set(deletedRows.map((r) => r.session_id))
 
       // Identify sessions whose valid message boundary or message fingerprint in `oc` differs from `main.session_turns`
-      const candidateSessions = this.db
-        .prepare(
-          `
+      const candidateSessionsSql = hasSessionPart
+        ? `
+          WITH target_sessions AS (
+            SELECT
+              s.id AS session_id,
+              CASE
+                WHEN s.revert IS NOT NULL AND json_valid(s.revert) THEN (
+                  SELECT rm.seq
+                  FROM oc.session_message rm
+                  WHERE rm.session_id = s.id
+                    AND rm.id = json_extract(s.revert, '$.messageID')
+                )
+                ELSE NULL
+              END AS revert_seq
+            FROM oc.session_v2 s
+            WHERE s.parent_id IS NULL
+              AND (? IS NULL OR s.id != ?)
+          ),
+          part_agg AS (
+            SELECT
+              p.session_id,
+              p.message_id,
+              COALESCE(MAX(p.time_updated), 0) AS max_part_updated,
+              COALESCE(SUM(LENGTH(p.data)), 0) AS part_data_len,
+              COUNT(p.ordinal) AS part_count,
+              COALESCE(SUM(COALESCE(p.time_updated, 0) % 1000000000), 0) AS part_time_mod
+            FROM target_sessions ts
+            JOIN oc.session_part p ON p.session_id = ts.session_id
+            GROUP BY p.session_id, p.message_id
+          ),
+          oc_bounds AS (
+            SELECT
+              ts.session_id,
+              ts.revert_seq,
+              COALESCE(MAX(m.seq), 0) AS max_valid_seq,
+              COALESCE(
+                MAX(
+                  CASE
+                    WHEN m.id IS NULL THEN 0
+                    ELSE MAX(COALESCE(m.time_updated, 0), COALESCE(pa.max_part_updated, 0))
+                  END
+                ),
+                0
+              )
+                + COALESCE(SUM(LENGTH(m.data)), 0) * 31
+                + COUNT(m.id) * 17
+                + COALESCE(SUM(pa.part_data_len), 0) * 37
+                + COALESCE(SUM(pa.part_count), 0) * 13
+                + COALESCE(SUM(pa.part_time_mod), 0) AS session_fingerprint
+            FROM target_sessions ts
+            LEFT JOIN oc.session_message m
+              ON m.session_id = ts.session_id
+              AND m.type IN ('user', 'assistant')
+              AND (ts.revert_seq IS NULL OR m.seq < ts.revert_seq)
+            LEFT JOIN part_agg pa
+              ON pa.session_id = m.session_id
+              AND pa.message_id = m.id
+              AND m.type = 'assistant'
+            GROUP BY ts.session_id
+          ),
+          st_bounds AS (
+            SELECT
+              session_id,
+              MAX(end_seq) AS max_end_seq,
+              MAX(updated_at) AS max_updated_at
+            FROM main.session_turns
+            GROUP BY session_id
+          )
+          SELECT
+            ob.session_id,
+            ob.revert_seq,
+            ob.max_valid_seq,
+            ob.session_fingerprint,
+            COALESCE(sb.max_end_seq, 0) AS max_end_seq,
+            COALESCE(sb.max_updated_at, 0) AS max_updated_at
+          FROM oc_bounds ob
+          LEFT JOIN st_bounds sb ON sb.session_id = ob.session_id
+        `
+        : `
           WITH target_sessions AS (
             SELECT
               s.id AS session_id,
@@ -509,8 +665,10 @@ export class RecallDatabase {
             COALESCE(sb.max_updated_at, 0) AS max_updated_at
           FROM oc_bounds ob
           LEFT JOIN st_bounds sb ON sb.session_id = ob.session_id
-        `,
-        )
+        `
+
+      const candidateSessions = this.db
+        .prepare(candidateSessionsSql)
         .all(excludeSessionID, excludeSessionID) as Array<{
         session_id: string
         revert_seq: number | null
@@ -544,6 +702,26 @@ export class RecallDatabase {
             AND (? IS NULL OR m.seq < ?)
           ORDER BY m.seq ASC
         `)
+
+        const fetchSessionPartsStmt = hasSessionPart
+          ? this.db.prepare(`
+              SELECT
+                p.message_id,
+                p.ordinal,
+                p.type,
+                p.time_updated,
+                LENGTH(p.data) AS data_len,
+                p.data
+              FROM oc.session_part p
+              JOIN oc.session_message m
+                ON m.session_id = p.session_id
+                AND m.id = p.message_id
+              WHERE p.session_id = ?
+                AND m.type = 'assistant'
+                AND (? IS NULL OR m.seq < ?)
+              ORDER BY m.seq ASC, p.ordinal ASC
+            `)
+          : null
 
         const existingForSessionStmt = this.db.prepare(`
           SELECT user_message_id, assistant_message_id
@@ -592,6 +770,35 @@ export class RecallDatabase {
             dirty.revert_seq,
             dirty.revert_seq,
           ) as unknown as RawMessageRow[]
+
+          if (fetchSessionPartsStmt) {
+            const partRows = fetchSessionPartsStmt.all(
+              dirty.session_id,
+              dirty.revert_seq,
+              dirty.revert_seq,
+            ) as unknown as RawSessionPartRow[]
+            if (partRows.length > 0) {
+              const partsByMessageID = new Map<string, RawSessionPartRow[]>()
+              for (const part of partRows) {
+                if (!part.message_id) continue
+                let list = partsByMessageID.get(part.message_id)
+                if (!list) {
+                  list = []
+                  partsByMessageID.set(part.message_id, list)
+                }
+                list.push(part)
+              }
+              for (const row of rows) {
+                if (row.type === "assistant") {
+                  const parts = partsByMessageID.get(row.id)
+                  if (parts && parts.length > 0) {
+                    row.parts = parts
+                  }
+                }
+              }
+            }
+          }
+
           const validTurns = groupMessagesIntoTurns(rows)
           const validTurnKeySet = new Set(
             validTurns.map((t) => `${t.userMessageID}\0${t.assistantMessageID}`),

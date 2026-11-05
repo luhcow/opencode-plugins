@@ -529,8 +529,12 @@ export default Plugin.define({
       const prompt = `${instructions}\n${collected.text}`
 
       try {
+        const generateText = ctx.experimental?.generate?.text ?? ctx.generate?.text
+        if (typeof generateText !== "function") {
+          throw new Error("host does not support text generation")
+        }
         const response = await raceWithAbort(
-          ctx.generate.text({ prompt, model }, { signal }),
+          generateText({ prompt, model }, { signal }),
           signal,
         )
         const parsed = parseGuardianAssessment(response.text)
