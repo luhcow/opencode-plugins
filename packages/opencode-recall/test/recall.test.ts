@@ -1491,9 +1491,13 @@ test("Test 8: Search result truncation (User 50 chars / Assistant 100 chars) and
   assert.doesNotMatch(formatted, /EXTRA_USER_TEXT/)
   assert.match(
     formatted,
-    /   Assistant: 1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890\.\.\.$/,
+    /   Assistant: 1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890\.\.\.\n/,
   )
   assert.doesNotMatch(formatted, /EXTRA_ASSISTANT_TEXT/)
+  assert.match(
+    formatted,
+    /Note: User\/Assistant texts above are truncated previews\. Load the `opencode` skill to retrieve the full session or message content\.$/,
+  )
 
   // 2. Verify 4 workspaces calling `plugin.setup(ctx)` share 1 single instance and refCount
   const env = createMockOpencodeDb()

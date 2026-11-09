@@ -112,6 +112,10 @@ export function formatSearchResults(
     )
   })
 
+  blocks.push(
+    "Note: User/Assistant texts above are truncated previews. Load the `opencode` skill to retrieve the full session or message content.",
+  )
+
   return blocks.join("\n\n")
 }
 
