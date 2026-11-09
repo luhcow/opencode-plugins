@@ -259,8 +259,7 @@ export default Plugin.define({
 
         if (verdict.kind === "deny") {
           notifyWarning(event.sessionID, event.action, key, verdict.rationale)
-          event.effect = "deny"
-          event.message = withNotices(renderGuardianRejection(verdict.rationale), notices)
+          concludeDeny(event as PermissionEvent, verdict.rationale, notices)
           return
         }
 
@@ -649,6 +648,15 @@ export default Plugin.define({
     function askHuman(event: PermissionEvent, reason: string, notices: readonly string[] = []): void {
       event.effect = "ask"
       event.message = withNotices(`Auto-review requires human confirmation: ${reason.trim()}`, notices)
+    }
+
+    function concludeDeny(event: PermissionEvent, rationale: string, notices: readonly string[] = []): void {
+      if (humanFallback) {
+        askHuman(event, rationale, notices)
+      } else {
+        event.effect = "deny"
+        event.message = withNotices(renderGuardianRejection(rationale), notices)
+      }
     }
 
     function concludeElevatedRisk(event: PermissionEvent, reason: string, notices: readonly string[] = []): void {
