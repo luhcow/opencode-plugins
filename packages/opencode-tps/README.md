@@ -4,10 +4,10 @@
 
 ## 功能特性
 
-- **流式实时估算（Streaming）**：在模型输出文本（`session.text.delta`）、思考过程（`session.reasoning.delta`）、工具参数（`session.tool.input.delta` / `session.tool.input.ended`）及压缩摘要（`session.compaction.delta`）时，以 100ms 刷新率实时计算并高亮显示 `⚡ ~XX.X tok/s`。
+- **流式实时估算（Streaming）**：在模型输出文本（`session.text.delta`）、思考过程（`session.reasoning.delta`）、工具参数（`session.tool.input.delta` / `session.tool.input.ended`）及压缩摘要（`session.compaction.delta`）时，以 100ms 刷新率实时计算并高亮显示 `⚡ ~XX.X tok/s`；在 OpenCode 2.3.0+ 下自动通过 `session.step.first-token` 排除首 Token 延迟（TTFT）。
 - **工具等待不稀释速度**：当单步模型流式输出完毕（`session.step.streamed` / `session.tool.called`）进入本地工具执行阶段时，自动锁定该步流式耗时，避免 Shell/MCP 等工具执行耗时拉低 `tok/s`。
 - **官方精确 Token 自动校准**：每个 Step 结束（`session.step.ended`）后，自动使用模型返回的精确 `tokens.output + tokens.reasoning` 替换估算值，并动态校准当前会话的字符/Token 估算系数。
-- **回合结束与历史会话保留显示**：回合完成后，在底部状态栏保留本轮最终精确生成速度 `XX.X tok/s`（与 OpenCode 原生 `SessionTurn.tokensPerSecond` 多步加权口径完全一致，并自动感知 `/undo` 回滚边界）。
+- **回合结束与历史会话保留显示**：回合完成后，在底部状态栏保留本轮最终精确生成速度 `XX.X tok/s`（与 OpenCode 原生 `SessionTurn.tokensPerSecond` 的 `streamed - (firstToken ?? created)` 多步加权口径完全一致，并自动感知 `/undo` 回滚边界）。
 
 ## 安装与配置
 
@@ -17,7 +17,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-tps"
+    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-tps"
   ]
 }
 ```

@@ -47,6 +47,14 @@ export default Plugin.define({
         )
         bump(event.created)
       }),
+      context.data.on("session.step.first-token", (event) => {
+        tracker.onFirstToken(
+          event.data.sessionID,
+          event.data.assistantMessageID,
+          event.created,
+        )
+        bump(event.created)
+      }),
       context.data.on("session.text.delta", (event) => {
         tracker.onDelta(
           event.data.sessionID,

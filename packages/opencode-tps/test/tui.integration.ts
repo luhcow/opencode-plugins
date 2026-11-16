@@ -186,4 +186,101 @@ test("renders real-time streaming tok/s in prompt footer and settles to exact to
   } as any)
 
   await setup.waitForFrame((frame: string) => frame.includes("50.0 tok/s") && !frame.includes("75.0 tok/s"))
+
+  // 4. OpenCode 2.3.0 session.step.first-token & time.firstToken exclude TTFT (10s TTFT, 2s stream -> 100.0 tok/s)
+  setup.events.emit({
+    id: "evt_000012",
+    type: "session.execution.started",
+    created: 10_000,
+    durable: { aggregateID: sessionID, seq: 10, version: 1 },
+    data: { sessionID },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000013",
+    type: "session.step.started",
+    created: 10_000,
+    durable: { aggregateID: sessionID, seq: 11, version: 1 },
+    data: {
+      sessionID,
+      assistantMessageID: "msg_a2",
+      agent: "build",
+      model: { providerID: "openai", id: "gpt-5" },
+      started: 10_000,
+    },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000014",
+    type: "session.step.first-token",
+    created: 20_000,
+    durable: { aggregateID: sessionID, seq: 12, version: 1 },
+    data: {
+      sessionID,
+      assistantMessageID: "msg_a2",
+    },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000015",
+    type: "session.text.delta",
+    created: 21_000,
+    data: {
+      sessionID,
+      assistantMessageID: "msg_a2",
+      ordinal: 0,
+      delta: "c".repeat(380),
+    },
+  } as any)
+
+  await setup.waitForFrame((frame: string) => frame.includes("⚡") && frame.includes("tok/s"))
+
+  currentMessages = [
+    ...currentMessages,
+    { id: "msg_u2", type: "user", text: "Second", time: { created: 10_000 } },
+    {
+      id: "msg_a2",
+      type: "assistant",
+      agent: "build",
+      model: { providerID: "openai", id: "gpt-5" },
+      finish: "stop",
+      cost: 0.01,
+      tokens: { input: 100, output: 200, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 10_000, firstToken: 20_000, streamed: 22_000, completed: 22_000 },
+      content: [{ type: "text", text: "c".repeat(380) }],
+    },
+    { id: "msg_idle2", type: "idle", outcome: "succeeded", time: { created: 22_000 } },
+  ]
+
+  setup.events.emit({
+    id: "evt_000016",
+    type: "session.step.streamed",
+    created: 22_000,
+    durable: { aggregateID: sessionID, seq: 13, version: 1 },
+    data: { sessionID, assistantMessageID: "msg_a2" },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000017",
+    type: "session.step.ended",
+    created: 22_000,
+    durable: { aggregateID: sessionID, seq: 14, version: 1 },
+    data: {
+      sessionID,
+      assistantMessageID: "msg_a2",
+      finish: "stop",
+      cost: 0.01,
+      tokens: { input: 100, output: 200, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+  } as any)
+
+  setup.events.emit({
+    id: "evt_000018",
+    type: "session.execution.succeeded",
+    created: 22_000,
+    durable: { aggregateID: sessionID, seq: 15, version: 1 },
+    data: { sessionID },
+  } as any)
+
+  await setup.waitForFrame((frame: string) => frame.includes("100.0 tok/s"))
 })

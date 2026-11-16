@@ -32,7 +32,7 @@ OpenCode V2 插件：支持在 **Ask（`question` 工具）提交后** 或 **问
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-reask"
+    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-reask"
   ]
 }
 ```

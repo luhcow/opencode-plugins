@@ -227,3 +227,53 @@ test("failed compaction and zero-output native compaction stop streaming without
   assert.equal(tracker.hasActiveStream(nativeSessionID), false)
   assert.equal(tracker.getSnapshot(nativeSessionID, 5_000), undefined)
 })
+
+test("OpenCode 2.3.0 firstToken excludes TTFT during live streaming and in historyTurnTps", () => {
+  const tracker = createTpsTracker()
+  const sessionID = "ses_first_token"
+
+  // Step starts at t=1000, but first token arrives at t=4000 (3s TTFT)
+  tracker.onExecutionStarted(sessionID)
+  tracker.onStepStarted(sessionID, "msg_a1", 1_000, 1_000)
+  tracker.onFirstToken(sessionID, "msg_a1", 4_000, 4_000)
+  tracker.onDelta(sessionID, "msg_a1", "a".repeat(380), 5_000)
+
+  // Live window is 5000 - 4000 = 1000ms (~100 tokens -> ~100.0 tok/s, not diluted by 3s TTFT)
+  const mid = tracker.getSnapshot(sessionID, 5_000)
+  assert.ok(mid)
+  assert.equal(mid.durationMs, 1_000)
+  assert.ok(Math.abs(mid.tps - 100) < 1)
+
+  tracker.onStepStreamed(sessionID, "msg_a1", 6_000)
+  tracker.onStepEnded(sessionID, "msg_a1", { input: 500, output: 200, reasoning: 0 }, 6_000)
+  tracker.onExecutionFinished(sessionID, 6_000)
+
+  const settled = tracker.getSnapshot(sessionID, 6_000)
+  assert.ok(settled)
+  assert.equal(settled.durationMs, 2_000)
+  assert.equal(settled.tokens, 200)
+  assert.equal(settled.tps, 100)
+
+  // Persisted history with time.firstToken matches live/settled weighting; legacy step without firstToken falls back to created
+  const history: HistoryMessageLike[] = [
+    { id: "msg_u1", type: "user", time: { created: 1_000 } },
+    {
+      id: "msg_a1",
+      type: "assistant",
+      time: { created: 1_000, firstToken: 4_000, streamed: 6_000, completed: 6_000 },
+      tokens: { output: 200, reasoning: 0 },
+    },
+    {
+      id: "msg_a2",
+      type: "assistant",
+      time: { created: 7_000, streamed: 9_000, completed: 9_000 },
+      tokens: { output: 100, reasoning: 0 },
+    },
+    { id: "msg_idle", type: "idle", time: { created: 9_000 } },
+  ]
+  const fromHistory = historyTurnTps(history)
+  assert.ok(fromHistory)
+  assert.equal(fromHistory.tokens, 300)
+  assert.equal(fromHistory.durationMs, 4_000)
+  assert.equal(fromHistory.tps, 75)
+})

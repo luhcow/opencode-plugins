@@ -13,6 +13,7 @@ export interface HistoryMessageLike {
   readonly type: string
   readonly time?: {
     readonly created?: number
+    readonly firstToken?: number
     readonly streamed?: number
     readonly completed?: number
   }
@@ -30,6 +31,7 @@ export interface TpsSnapshot {
 interface StepState {
   id: string
   startedAt: number
+  firstTokenAt?: number
   lastEventAt: number
   firstDeltaAt?: number
   streamedAt?: number
@@ -107,7 +109,8 @@ export function historyTurnTps(
     const msg = messages[i]
     if (msg.type === "assistant") {
       const out = (msg.tokens?.output ?? 0) + (msg.tokens?.reasoning ?? 0)
-      if (out > 0 && msg.time?.streamed !== undefined && msg.time?.created !== undefined) {
+      const start = msg.time?.firstToken ?? msg.time?.created
+      if (out > 0 && msg.time?.streamed !== undefined && start !== undefined) {
         lastAssistantIndex = i
         break
       }
@@ -124,10 +127,10 @@ export function historyTurnTps(
   let totalDurationMs = 0
   for (const step of steps) {
     const tokens = (step.tokens?.output ?? 0) + (step.tokens?.reasoning ?? 0)
-    const created = step.time?.created
+    const stepStart = step.time?.firstToken ?? step.time?.created
     const streamed = step.time?.streamed
-    if (tokens <= 0 || created === undefined || streamed === undefined) continue
-    const duration = Math.max(0, streamed - created)
+    if (tokens <= 0 || stepStart === undefined || streamed === undefined) continue
+    const duration = Math.max(0, streamed - stepStart)
     if (duration <= 0) continue
     totalTokens += tokens
     totalDurationMs += duration
@@ -248,7 +251,23 @@ export function createTpsTracker() {
       }
       const step = getOrCreateStep(state, assistantMessageID, now, startedAt > 0 ? startedAt : now, true)
       step.streaming = true
+      step.firstTokenAt = undefined
       step.streamedAt = undefined
+    },
+
+    onFirstToken(sessionID: string, assistantMessageID: string, firstTokenAt: number, now = Date.now()) {
+      const state = getOrCreateSession(sessionID)
+      if (!state.running) {
+        state.running = true
+        state.steps = []
+      }
+      const ts = firstTokenAt > 0 ? firstTokenAt : now
+      const step = getOrCreateStep(state, assistantMessageID, Math.max(now, ts))
+      step.firstTokenAt ??= ts
+      if (step.firstTokenAt < step.startedAt) {
+        step.startedAt = step.firstTokenAt
+      }
+      step.streaming = true
     },
 
     onDelta(sessionID: string, assistantMessageID: string, delta: string, now = Date.now()) {
@@ -301,7 +320,7 @@ export function createTpsTracker() {
       if (!state) return
       const step = state.steps.findLast((s) => s.id === assistantMessageID) ?? state.steps.at(-1)
       if (!step) return
-      step.streamedAt ??= Math.max(step.startedAt, streamedAt)
+      step.streamedAt ??= Math.max(step.firstTokenAt ?? step.startedAt, streamedAt)
       step.streaming = false
     },
 
@@ -313,7 +332,7 @@ export function createTpsTracker() {
     ) {
       const state = getOrCreateSession(sessionID)
       const step = getOrCreateStep(state, assistantMessageID, endedAt)
-      step.streamedAt ??= Math.max(step.startedAt, endedAt)
+      step.streamedAt ??= Math.max(step.firstTokenAt ?? step.startedAt, endedAt)
       step.streaming = false
       step.ended = true
 
@@ -343,7 +362,7 @@ export function createTpsTracker() {
       if (assistantMessageID === "compaction" && step.id !== "compaction" && !step.ended) {
         step.id = "compaction"
       }
-      step.streamedAt ??= Math.max(step.startedAt, endedAt)
+      step.streamedAt ??= Math.max(step.firstTokenAt ?? step.startedAt, endedAt)
       step.streaming = false
       step.ended = true
       const exactOut = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
@@ -364,7 +383,7 @@ export function createTpsTracker() {
       for (const step of state.steps) {
         if (step.streaming) {
           step.streaming = false
-          step.streamedAt ??= Math.max(step.startedAt, endedAt)
+          step.streamedAt ??= Math.max(step.firstTokenAt ?? step.startedAt, endedAt)
         }
       }
     },
@@ -436,10 +455,11 @@ export function createTpsTracker() {
             anyStreaming = true
           }
 
+          const startMs = step.firstTokenAt ?? step.startedAt
           const liveEndMs =
             now >= step.lastEventAt && now - step.lastEventAt <= 60_000 ? now : step.lastEventAt
           const endMs = step.streamedAt ?? liveEndMs
-          const durationMs = Math.max(MIN_DURATION_MS, endMs - step.startedAt)
+          const durationMs = Math.max(MIN_DURATION_MS, endMs - startMs)
           totalTokens += stepTokens
           totalDurationMs += durationMs
         }

@@ -16,22 +16,22 @@ OpenCode V2 插件 Monorepo。
 
 ## 安装与配置
 
-开发验证需要 Node.js 22.13+（建议 Node.js 24）、npm 和 OpenCode V2。依赖锁定验证基线为 `@opencode/plugin` 2.2.5 / OpenTUI 0.8.0（同时兼容 `@opencode/plugin` 2.2.2+ / OpenTUI 0.7+）；使用 TUI 内部节点的插件需要兼容的宿主版本。
+开发验证需要 Node.js 22.13+（建议 Node.js 24）、npm 和 OpenCode V2。依赖锁定验证基线为 `@opencode/plugin` 2.3.0 / OpenTUI 0.8.4（同时兼容 `@opencode/plugin` 2.2.2+ / OpenTUI 0.7+）；使用 TUI 内部节点的插件需要兼容的宿主版本。
 
 ### 从 GitHub 安装
 
-仓库已公开，可直接引用 `v0.1.0` 标签下的插件子目录。在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中配置所需插件：
+仓库已公开，可直接引用 `v0.2.0` 标签下的插件子目录。在全局 `~/.config/opencode/opencode.jsonc` 或项目级 `opencode.jsonc` 中配置所需插件：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-auto-rename",
-    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-reask",
-    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-compact-before",
-    "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-tps",
+    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-auto-rename",
+    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-reask",
+    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-compact-before",
+    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-tps",
     {
-      "package": "github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-auto-review",
+      "package": "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-auto-review",
       "options": {
         "humanFallback": true
       }
@@ -42,8 +42,8 @@ OpenCode V2 插件 Monorepo。
 
 另外两个插件可按需添加：
 
-- [`recall`](./packages/opencode-recall)：`github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-recall` ，会读取宿主历史数据库并首次下载本地向量模型。
-- [`a2a`](./packages/opencode-a2a)：`github:luhcow/opencode-plugins#v0.1.0::path:packages/opencode-a2a` ，需在 `options.agents` 中配置自己的服务。
+- [`recall`](./packages/opencode-recall)：`github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-recall` ，会读取宿主历史数据库并首次下载本地向量模型。
+- [`a2a`](./packages/opencode-a2a)：`github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-a2a` ，需在 `options.agents` 中配置自己的服务。
 
 `::path:` 用于选择 Monorepo 内的插件包，不能省略。以上 Git 引用可直接安装，无需等待 npm 发布。完整配置和数据流见各插件 README。
 
