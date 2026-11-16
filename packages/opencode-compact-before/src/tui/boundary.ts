@@ -115,10 +115,10 @@ function projectBoundary(context: Context, boundary: Boundary) {
           content: boundary.checkpoint.summary,
           syntaxStyle: syntax,
           streaming: false,
-          internalBlockMode: "top-level",
           tableOptions: { style: "grid", cellPaddingX: 1 },
           fg: context.theme.markdown.text,
           bg: context.theme.background.base,
+          ...({ internalBlockMode: "top-level" } as Record<string, unknown>),
         }),
       )
       view.add(

@@ -17,7 +17,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.2.0::path:packages/opencode-tps"
+    "github:luhcow/opencode-plugins#v0.2.1::path:packages/opencode-tps"
   ]
 }
 ```
