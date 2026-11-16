@@ -129,7 +129,7 @@ export const SESSION_SEARCH_INPUT_SCHEMA = {
     query: {
       type: "string",
       description:
-        "Natural language query describing the problem, topic, or discussion to search for in historical OpenCode sessions.",
+        "A complete, descriptive natural-language sentence or question capturing the problem, symptom, concept, or discussion context as it would appear in a User/Assistant conversation (e.g., 'How to fix memory spike caused by large embedding context size in opencode-recall'). Do NOT pass bare space-separated keywords, boolean/search operators (AND, OR, quotes), or isolated file paths/IDs—this tool uses dense semantic vector similarity only, not keyword or exact-match search.",
     },
     scope: {
       type: "string",
@@ -310,7 +310,7 @@ export default Plugin.define({
       editor.add({
         name: "session_search",
         description:
-          "Search historical OpenCode sessions by semantic similarity. Returns matching user/assistant conversation turns grouped by content with all associated session IDs (including forks) and turn locations.",
+          "Search historical OpenCode sessions using pure dense-vector semantic similarity over conversational User/Assistant turns (NO keyword, BM25/FTS, regex, or exact-string matching). Always formulate `query` as a descriptive natural-language sentence or question reflecting the intent, problem context, or explanation—never as a bag of keywords or boolean operators (for exact identifiers/strings, use text search or database queries instead). Returns matching turns grouped by content with associated session IDs (including forks), turn locations, and truncated previews.",
         input: SESSION_SEARCH_INPUT_SCHEMA as never,
         async execute(rawInput, toolContext) {
           const input = (rawInput ?? {}) as SessionSearchToolInput
