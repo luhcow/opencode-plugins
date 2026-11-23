@@ -10,7 +10,7 @@ OpenCode V2 的通用 A2A HTTP+JSON REST 客户端插件。支持多 Agent、Age
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [{
-    "package": "github:luhcow/opencode-plugins#v0.2.1::path:packages/opencode-a2a",
+    "package": "github:luhcow/opencode-plugins#v0.2.2::path:packages/opencode-a2a",
     "options": {
       "agents": {
         "research": {

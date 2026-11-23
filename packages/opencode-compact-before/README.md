@@ -22,7 +22,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.2.1::path:packages/opencode-compact-before"
+    "github:luhcow/opencode-plugins#v0.2.2::path:packages/opencode-compact-before"
   ]
 }
 ```
