@@ -72,7 +72,7 @@ async function fixture(attachment = false, paged = false) {
 async function waitForBoundary(setup: Awaited<ReturnType<typeof fixture>>, before = "Kept boundary request") {
   await setup.waitForFrame(
     (frame: string) =>
-      frame.includes("以上历史已总结") &&
+      frame.includes("Compact before · 以上历史已总结") &&
       frame.includes("BOUNDARY_CHECKPOINT_TEXT") &&
       frame.indexOf("BOUNDARY_CHECKPOINT_TEXT") < frame.indexOf(before) &&
       frame.split("BOUNDARY_CHECKPOINT_TEXT").length === 2,
@@ -184,7 +184,8 @@ test("a newly completed checkpoint moves the boundary and a later native compact
   await setup.waitForFrame(
     (frame: string) =>
       frame.includes("SECOND_CHECKPOINT_TEXT") &&
-      frame.includes("以上历史已总结") &&
+      frame.includes("Compaction · 以上历史已总结") &&
+      !frame.includes("Compact before · 以上历史已总结") &&
       frame.indexOf("SECOND_CHECKPOINT_TEXT") < frame.indexOf("Later retained request"),
   )
   expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_004")).toBeUndefined()
@@ -206,7 +207,7 @@ test("a newly completed checkpoint moves the boundary and a later native compact
   await setup.waitForFrame(
     (frame: string) =>
       frame.includes("THIRD_CHECKPOINT_TEXT") &&
-      frame.includes("以上历史已总结") &&
+      frame.includes("Compact before · 以上历史已总结") &&
       frame.indexOf("THIRD_CHECKPOINT_TEXT") < frame.indexOf("Later retained request"),
   )
   expect(setup.renderer.root.findDescendantById("compact-before-boundary:msg_007")?.parent?.id).toBe("msg_003")
@@ -272,7 +273,8 @@ test("native summary checkpoint with an assistant keepID renders before the assi
   await setup.ready
   await setup.waitForFrame(
     (frame: string) =>
-      frame.includes("以上历史已总结") &&
+      frame.includes("Compaction · 以上历史已总结") &&
+      !frame.includes("Compact before · 以上历史已总结") &&
       frame.includes("ASSISTANT_BOUNDARY_SUMMARY") &&
       frame.indexOf("ASSISTANT_BOUNDARY_SUMMARY") < frame.indexOf("Kept assistant answer") &&
       frame.split("ASSISTANT_BOUNDARY_SUMMARY").length === 2,
@@ -437,10 +439,72 @@ test("shell rows before an attachment-only boundary and folded low-verbosity ass
   })
   await setup.waitForFrame(
     (frame: string) =>
+      frame.includes("Compaction · 以上历史已总结") &&
+      !frame.includes("Compact before · 以上历史已总结") &&
       frame.includes("FOLDED_ASSISTANT_BOUNDARY") &&
       frame.indexOf("after-shell.txt") < frame.indexOf("FOLDED_ASSISTANT_BOUNDARY") &&
       frame.indexOf("FOLDED_ASSISTANT_BOUNDARY") < frame.indexOf("Kept final answer") &&
       frame.split("FOLDED_ASSISTANT_BOUNDARY").length === 2,
+  )
+})
+
+test("bottom duplicate summary is hidden immediately while an older boundary target is still unmounted", async () => {
+  const sessionID = "ses_boundary_no_flicker"
+  const session = {
+    id: sessionID,
+    title: "Offscreen boundary no flicker",
+    projectID: "proj_test",
+    location: { directory: "/project" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, updated: 0 },
+  }
+  const allMessages = [
+    { id: "msg_001", type: "user", text: "Archived early request", time: { created: 1 } },
+    { id: "msg_002", type: "user", text: "Unmounted kept boundary", time: { created: 2 } },
+    {
+      id: "msg_003",
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\nOFFSCREEN_BOUNDARY_SUMMARY",
+      metadata: { keepID: "msg_002" },
+      time: { created: 3 },
+    },
+    { id: "msg_004", type: "user", text: "Bottom tail request", time: { created: 4 } },
+  ]
+  await using setup = await createAppFixture({
+    width: 120,
+    height: 30,
+    args: { sessionID },
+    config: { animations: false, tabs: { enabled: false }, plugins: [plugin] },
+    fetch: async (url: URL) => {
+      if (url.pathname === "/api/session") return Response.json({ data: [session], cursor: {} })
+      if (url.pathname === `/api/session/${sessionID}`) return Response.json({ data: session })
+      if (url.pathname === `/api/session/${sessionID}/inbox`) return Response.json({ data: [] })
+      if (url.pathname === `/api/session/${sessionID}/message`) {
+        const type = url.searchParams.get("type")
+        if (!type && !url.searchParams.has("cursor")) {
+          // Initial tail page contains the compaction row and newer tail, while beforeID is in the older page.
+          return Response.json({ data: [...allMessages.slice(2)].reverse(), cursor: { next: "older" } })
+        }
+        const result = type ? allMessages.filter((message) => message.type === type) : allMessages
+        return Response.json({ data: [...result].reverse(), cursor: {} })
+      }
+    },
+  })
+  await setup.ready
+  // While at the bottom before older history mounts, the duplicate bottom Compaction block is already hidden.
+  await setup.waitForFrame(
+    (frame: string) => frame.includes("Bottom tail request") && !frame.includes("OFFSCREEN_BOUNDARY_SUMMARY"),
+  )
+  // Scrolling to the top mounts the older boundary and renders the summary once above it with native heading.
+  setup.mockInput.pressKey("HOME")
+  await setup.waitForFrame(
+    (frame: string) =>
+      frame.includes("Compaction · 以上历史已总结") &&
+      frame.includes("OFFSCREEN_BOUNDARY_SUMMARY") &&
+      frame.indexOf("OFFSCREEN_BOUNDARY_SUMMARY") < frame.indexOf("Unmounted kept boundary") &&
+      frame.split("OFFSCREEN_BOUNDARY_SUMMARY").length === 2,
   )
 })
 

@@ -12,7 +12,12 @@ import { createEffect, createMemo, createResource, createSignal, onCleanup } fro
 import { activeCheckpointID, errorText, findCheckpoint, resolveCheckpoint, visibleHistory } from "../core.ts"
 
 type Checkpoint = Extract<SessionMessageInfo, { type: "compaction"; status: "completed" }>
-type Boundary = { sessionID: string; checkpoint: Checkpoint; beforeID: string }
+type Boundary = {
+  sessionID: string
+  checkpoint: Checkpoint
+  beforeID: string
+  source: "compact-before" | "native"
+}
 
 function* descendants(node: Renderable): Generator<Renderable> {
   yield node
@@ -109,6 +114,16 @@ function boundaryRow(context: Context, boundary: Boundary, contents: Set<Rendera
   }
 }
 
+/** True when `beforeID` belongs to active un-reverted history (even if off-screen or in an older page). */
+function hasValidBoundaryTarget(context: Context, boundary: Boundary): boolean {
+  const all = context.data.session.message.list(boundary.sessionID)
+  const revertID = context.data.session.get(boundary.sessionID)?.revert?.messageID
+  const messages = visibleHistory(all, revertID)
+  if (messages.some((message) => message.id === boundary.beforeID)) return true
+  if (all.some((message) => message.id === boundary.beforeID)) return false
+  return messages.length > 0 && boundary.beforeID < messages[0].id
+}
+
 function projectBoundary(context: Context, boundary: Boundary) {
   const renderer = context.renderer
   const syntax = SyntaxStyle.fromStyles(
@@ -150,9 +165,11 @@ function projectBoundary(context: Context, boundary: Boundary) {
         paddingX: 2,
         paddingY: 1,
       })
+      const heading =
+        boundary.source === "compact-before" ? "Compact before · 以上历史已总结" : "Compaction · 以上历史已总结"
       view.add(
         new TextRenderable(renderer, {
-          content: "Compact before · 以上历史已总结",
+          content: heading,
           fg: context.theme.text.feedback.info.base,
           marginBottom: 1,
         }),
@@ -179,9 +196,12 @@ function projectBoundary(context: Context, boundary: Boundary) {
     }
 
     const replaced = Boolean(target && view && !view.isDestroyed && view.parent === target)
-    // Compaction rows have no message ID in 2.2.x. Identify the native summary by its
+    // Hide the bottom duplicate immediately when `beforeID` is valid in active history so
+    // tail-first mounting never flashes the summary at the bottom before scrolling up to `beforeID`.
+    const hideOriginal = replaced || hasValidBoundaryTarget(context, boundary)
+    // Compaction rows have no message ID in 2.2+. Identify the native summary by its
     // Markdown body and Compaction heading; the plugin's copy lives inside the target row.
-    const originals = replaced
+    const originals = hideOriginal
       ? nodes.flatMap((node) => {
           if (!(node instanceof MarkdownRenderable) || node.content !== boundary.checkpoint.summary.trim()) return []
           const row = timelineRow(node, contents)
@@ -199,12 +219,12 @@ function projectBoundary(context: Context, boundary: Boundary) {
         hidden.delete(row)
         continue
       }
-      if (!replaced || row !== original) {
+      if (!hideOriginal || row !== original) {
         row.visible = visible
         hidden.delete(row)
       }
     }
-    if (replaced && original && !hidden.has(original)) {
+    if (hideOriginal && original && !hidden.has(original)) {
       hidden.set(original, original.visible)
       original.visible = false
     }
@@ -259,7 +279,7 @@ export function installBoundaryView(context: Context) {
             if (checkpoint) {
               const resolved = resolveCheckpoint(checkpoint)
               return resolved?.kind === "boundary"
-                ? { sessionID, checkpoint, beforeID: resolved.beforeID }
+                ? { sessionID, checkpoint, beforeID: resolved.beforeID, source: resolved.source }
                 : undefined
             }
             if (!page.data.length) return
