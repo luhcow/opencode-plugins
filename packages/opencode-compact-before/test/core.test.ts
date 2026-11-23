@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   activeCheckpointID,
+  createMessageID,
   findCheckpoint,
   prefixTranscript,
   resolveCheckpoint,
@@ -191,4 +192,16 @@ test("selects active completed checkpoint in visible history and ignores failed 
   const descending = [...messages].reverse()
   assert.equal(findCheckpoint(descending, "msg_2")?.id, "msg_2")
   assert.equal(findCheckpoint(descending, "msg_5"), undefined)
+})
+
+test("generates globally unique, lexicographically monotonic msg_ IDs matching native SessionMessage.ID", () => {
+  const t0 = 1_795_417_000_000
+  const id1 = createMessageID(t0)
+  const id2 = createMessageID(t0)
+  const id3 = createMessageID(t0 + 1)
+  for (const id of [id1, id2, id3]) {
+    assert.match(id, /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+  }
+  assert.ok(id1 < id2)
+  assert.ok(id2 < id3)
 })

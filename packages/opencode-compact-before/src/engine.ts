@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto"
-import { summaryPrompt, type Message, type ModelRef } from "./core.ts"
+import { createMessageID, summaryPrompt, type Message, type ModelRef } from "./core.ts"
 
 export type Selection = { beforeID: string; transcript: string }
 export type StartInput = Selection & { sessionID: string }
@@ -24,7 +23,7 @@ const selectionKey = (requestID: string) => `selection/${requestID}`
 export function createEngine(host: Host) {
   return {
     async start(input: StartInput) {
-      const requestID = `msg_${randomUUID().replaceAll("-", "")}`
+      const requestID = createMessageID()
       await host.put(selectionKey(requestID), { beforeID: input.beforeID, transcript: input.transcript })
       const admitted = await host.compact(input.sessionID, requestID)
       // Native admission coalesces pending compactions; the already-admitted request keeps its selection.

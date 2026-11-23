@@ -1,5 +1,27 @@
 import { NATIVE_SUMMARY_PROMPT } from "./prompt.ts"
 
+const ID_LENGTH = 26
+const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+let lastTimestamp = 0
+let counter = 0
+
+/** Matches native `SessionMessage.ID.create()` (`msg_` + monotonic 48-bit hex timestamp/counter + random base62). */
+export function createMessageID(timestamp = Date.now()): string {
+  if (timestamp !== lastTimestamp) {
+    lastTimestamp = timestamp
+    counter = 0
+  }
+  counter++
+  const value = BigInt(timestamp) * 0x1000n + BigInt(counter)
+  const time = Array.from({ length: 6 }, (_, index) =>
+    Number((value >> BigInt(40 - 8 * index)) & 0xffn)
+      .toString(16)
+      .padStart(2, "0"),
+  ).join("")
+  const bytes = crypto.getRandomValues(new Uint8Array(ID_LENGTH - 12))
+  return `msg_${time}${Array.from(bytes, (byte) => ID_CHARS[byte % 62]).join("")}`
+}
+
 export type Message = {
   id: string
   type: string
