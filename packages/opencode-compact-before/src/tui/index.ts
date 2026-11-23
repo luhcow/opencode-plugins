@@ -6,8 +6,6 @@ import { installBoundaryView } from "./boundary.ts"
 export default Plugin.define({
   id: "compact-before.tui",
   setup(context) {
-    const rpc = context.client.rpc(CompactBeforeRpc)
-
     const select = async () => {
       const route = context.ui.router.current()
       if (route.type !== "session") return
@@ -51,7 +49,9 @@ export default Plugin.define({
         await context.client.session.message.get({ sessionID, messageID: beforeID }, reads)
         const current = await context.client.session.get({ sessionID })
         const messages = visibleHistory(await list(), current.revert?.messageID)
-        await rpc.start({ sessionID, beforeID, transcript: prefixTranscript(messages, beforeID) }, { location })
+        await context.client
+          .rpc(CompactBeforeRpc)
+          .start({ sessionID, beforeID, transcript: prefixTranscript(messages, beforeID) }, { location })
         context.ui.toast.show({ title: "Compact before", message: "已提交原生压缩。", variant: "success" })
       } catch (error) {
         context.ui.toast.show({ title: "Compact before", message: errorText(error), variant: "error" })

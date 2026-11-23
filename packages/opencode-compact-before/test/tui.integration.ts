@@ -1,16 +1,20 @@
 import { expect, test } from "bun:test"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { createMessageID } from "../src/core.ts"
 import { NATIVE_SUMMARY_PROMPT } from "../src/prompt.ts"
 
 const source = process.env.OPENCODE_SOURCE_DIR
-if (!source) throw new Error("Set OPENCODE_SOURCE_DIR to an OpenCode 2.2.x checkout")
+if (!source) throw new Error("Set OPENCODE_SOURCE_DIR to an OpenCode V2 checkout")
 const { createAppFixture } = await import(pathToFileURL(path.join(source, "packages/tui/test/fixture/app.ts")).href)
 const plugin = path.resolve(import.meta.dirname, "..")
 
-test("summary instructions are the unmodified native prompt", async () => {
+test("summary instructions and monotonic message ID prefix match upstream OpenCode", async () => {
   const native = await import(pathToFileURL(path.join(source, "packages/core/src/session/compaction.ts")).href)
   expect(NATIVE_SUMMARY_PROMPT).toBe(native.buildPrompt(false))
+  const { Identifier } = await import(pathToFileURL(path.join(source, "packages/schema/src/identifier.ts")).href)
+  const ts = 1_795_417_000_123
+  expect(createMessageID(ts).slice(0, 16)).toBe(`msg_${Identifier.create(false, ts).slice(0, 12)}`)
 })
 
 test("one Enter opens the slash selector; keyboard works; full history loads only after selection", async () => {

@@ -295,6 +295,155 @@ test("native summary checkpoint with an assistant keepID renders before the assi
   )
 })
 
+test("shell rows before an attachment-only boundary and folded low-verbosity assistant steps resolve cleanly", async () => {
+  const sessionID = "ses_boundary_232"
+  const session = {
+    id: sessionID,
+    title: "OpenCode 2.3.2 boundary cases",
+    projectID: "proj_test",
+    location: { directory: "/project" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, updated: 0 },
+  }
+  const messages: Array<Record<string, unknown>> = [
+    { id: "msg_001", type: "user", text: "Archived request", time: { created: 1 } },
+    {
+      id: "msg_002",
+      type: "shell",
+      shellID: "sh_001",
+      command: "echo shell_marker",
+      status: "completed",
+      exit: 0,
+      output: { output: "shell_marker", truncated: false },
+      time: { created: 2, completed: 2.5 },
+    },
+    {
+      id: "msg_003",
+      type: "user",
+      text: "",
+      files: [{ type: "file", mime: "text/plain", name: "after-shell.txt", data: "aGk=", source: { type: "inline" } }],
+      time: { created: 3 },
+    },
+    {
+      id: "msg_004",
+      type: "assistant",
+      agent: "build",
+      model: { providerID: "fixture", id: "fixture" },
+      finish: "tool-calls",
+      time: { created: 4, completed: 4.5 },
+      content: [
+        {
+          type: "tool",
+          id: "call_1",
+          name: "read",
+          time: { created: 4, completed: 4.5 },
+          state: {
+            status: "completed",
+            input: { path: "a.ts" },
+            metadata: {},
+            content: [{ type: "text", text: "a" }],
+          },
+        },
+      ],
+    },
+    {
+      id: "msg_005",
+      type: "assistant",
+      agent: "build",
+      model: { providerID: "fixture", id: "fixture" },
+      finish: "tool-calls",
+      time: { created: 5, completed: 5.5 },
+      content: [
+        {
+          type: "tool",
+          id: "call_2",
+          name: "read",
+          time: { created: 5, completed: 5.5 },
+          state: {
+            status: "completed",
+            input: { path: "b.ts" },
+            metadata: {},
+            content: [{ type: "text", text: "b" }],
+          },
+        },
+      ],
+    },
+    {
+      id: "msg_006",
+      type: "assistant",
+      agent: "build",
+      model: { providerID: "fixture", id: "fixture" },
+      finish: "stop",
+      time: { created: 6, completed: 6.5 },
+      content: [{ type: "text", text: "Kept final answer" }],
+    },
+    {
+      id: "msg_007",
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\nSHELL_ATTACHMENT_BOUNDARY",
+      metadata: { keepID: "msg_003", compactBefore: { beforeID: "msg_003", requestID: "msg_007" } },
+      time: { created: 7 },
+    },
+  ]
+  await using setup = await createAppFixture({
+    width: 120,
+    height: 60,
+    args: { sessionID },
+    config: { animations: false, tabs: { enabled: false }, plugins: [plugin] },
+    fetch: async (url: URL) => {
+      if (url.pathname === "/api/session") return Response.json({ data: [session], cursor: {} })
+      if (url.pathname === `/api/session/${sessionID}`) return Response.json({ data: session })
+      if (url.pathname === `/api/session/${sessionID}/inbox`) return Response.json({ data: [] })
+      if (url.pathname === `/api/session/${sessionID}/message`) {
+        const type = url.searchParams.get("type")
+        const result = type ? messages.filter((message) => message.type === type) : messages
+        return Response.json({ data: [...result].reverse(), cursor: {} })
+      }
+    },
+  })
+  await setup.ready
+  await setup.waitForFrame(
+    (frame: string) =>
+      frame.includes("SHELL_ATTACHMENT_BOUNDARY") &&
+      frame.indexOf("echo shell_marker") < frame.indexOf("SHELL_ATTACHMENT_BOUNDARY") &&
+      frame.indexOf("SHELL_ATTACHMENT_BOUNDARY") < frame.indexOf("after-shell.txt") &&
+      frame.split("SHELL_ATTACHMENT_BOUNDARY").length === 2,
+  )
+
+  // Folded tool-only assistant keepID (msg_005 is inside msg_004's low-verbosity activity group) anchors before msg_006
+  setup.events.emit({
+    id: "evt_008",
+    created: 8,
+    type: "session.compaction.started",
+    durable: { aggregateID: sessionID, seq: "8", version: 1 },
+    data: { sessionID, reason: "auto" },
+  })
+  messages.push({
+    id: "msg_008",
+    type: "compaction",
+    status: "completed",
+    summary: "## Objective\nFOLDED_ASSISTANT_BOUNDARY",
+    metadata: { keepID: "msg_005" },
+    time: { created: 9 },
+  })
+  setup.events.emit({
+    id: "evt_end_9",
+    created: 9,
+    type: "session.compaction.ended",
+    durable: { aggregateID: sessionID, seq: "9", version: 1 },
+    data: { sessionID, reason: "auto", text: "## Objective\nFOLDED_ASSISTANT_BOUNDARY" },
+  })
+  await setup.waitForFrame(
+    (frame: string) =>
+      frame.includes("FOLDED_ASSISTANT_BOUNDARY") &&
+      frame.indexOf("after-shell.txt") < frame.indexOf("FOLDED_ASSISTANT_BOUNDARY") &&
+      frame.indexOf("FOLDED_ASSISTANT_BOUNDARY") < frame.indexOf("Kept final answer") &&
+      frame.split("FOLDED_ASSISTANT_BOUNDARY").length === 2,
+  )
+})
+
 test("new sessions do not request checkpoints while native optimistic creation is pending", async () => {
   const location = {
     directory: "/tmp/opencode/packages/tui",

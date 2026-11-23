@@ -19,15 +19,34 @@ function* descendants(node: Renderable): Generator<Renderable> {
   for (const child of node.getChildren()) yield* descendants(child)
 }
 
+function nodeId(node: Renderable): string | undefined {
+  const id = (node as { id?: unknown }).id
+  return typeof id === "string" && id.length > 0 ? id : undefined
+}
+
 function timelineRow(node: Renderable, contents: Set<Renderable>): Renderable | undefined {
   let row = node
   while (row.parent && !contents.has(row.parent)) row = row.parent
   return row.parent && contents.has(row.parent) ? row : undefined
 }
 
-/** Native 2.2.x gives text user rows and first assistant rows their message ID, and assistant
- * part rows `session-part:${messageID}:${partID}`. Attachment-only user rows have no ID;
- * locate those by their ordinal relative to the other user rows in the same mounted timeline. */
+function isRenderedLeftBorderMessage(message: {
+  type: string
+  text?: string
+  files?: readonly unknown[]
+  skills?: readonly unknown[]
+}): boolean {
+  if (message.type === "shell") return true
+  if (message.type !== "user") return false
+  if (message.text === undefined && message.files === undefined && message.skills === undefined) return true
+  return Boolean(message.text?.trim() || message.files?.length || message.skills?.length)
+}
+
+/** Native 2.2+ gives text user rows and first assistant rows their message ID, and assistant
+ * part rows `session-part:${messageID}:${partID}`. Attachment-only user rows have `id = undefined`
+ * at runtime in OpenTUI 0.8+; locate those by their ordinal among left-bordered user/shell rows.
+ * Under 2.3+ `verbosity: "low"`, a tool-only assistant step can fold into the previous step's
+ * activity group; when both sides around `beforeID` are mounted, anchor on the next retained row. */
 function boundaryRow(context: Context, boundary: Boundary, contents: Set<Renderable>, nodes: Renderable[]) {
   const all = context.data.session.message.list(boundary.sessionID)
   const revertID = context.data.session.get(boundary.sessionID)?.revert?.messageID
@@ -39,26 +58,54 @@ function boundaryRow(context: Context, boundary: Boundary, contents: Set<Rendera
   ) {
     return
   }
-  const direct = context.renderer.root.findDescendantById(boundary.beforeID)
-  if (direct) return timelineRow(direct, contents) ?? direct
-  const part = nodes.find((node) => node.id.startsWith(`session-part:${boundary.beforeID}:`))
-  if (part) return timelineRow(part, contents) ?? part
-  const users = messages.filter((message) => message.type === "user")
-  const index = users.findIndex((message) => message.id === boundary.beforeID)
-  if (index < 0) return
-  const nonUsers = new Set(messages.filter((message) => message.type !== "user").map((message) => message.id))
-  for (const content of contents) {
-    const rows = content.getChildren().filter((row) => {
-      if (row.id.startsWith("session-part:") || nonUsers.has(row.id)) return false
-      const body = row.getChildren().find((child) => !child.id.startsWith("compact-before-boundary:"))
-      return body instanceof BoxRenderable && Array.isArray(body.border) && body.border.join() === "left"
-    })
-    const anchor = rows.findIndex((row) => users.some((user) => user.id === row.id))
-    if (anchor >= 0) {
-      const offset = users.findIndex((user) => user.id === rows[anchor].id) - anchor
-      return rows[index - offset]
+  const directOrPartRow = (id: string) => {
+    const direct = context.renderer.root.findDescendantById(id)
+    if (direct) return timelineRow(direct, contents) ?? direct
+    const part = nodes.find((node) => nodeId(node)?.startsWith(`session-part:${id}:`))
+    return part ? timelineRow(part, contents) ?? part : undefined
+  }
+  const found = directOrPartRow(boundary.beforeID)
+  if (found) return found
+
+  const leftBorderMessages = messages.filter(isRenderedLeftBorderMessage)
+  const leftIndex = leftBorderMessages.findIndex((message) => message.id === boundary.beforeID)
+  if (leftIndex >= 0) {
+    const nonLeftBorderIDs = new Set(
+      messages.filter((message) => !isRenderedLeftBorderMessage(message)).map((message) => message.id),
+    )
+    const userIDs = new Set(
+      leftBorderMessages.filter((message) => message.type === "user").map((message) => message.id),
+    )
+    for (const content of contents) {
+      const rows = content.getChildren().filter((row) => {
+        const id = nodeId(row)
+        if (id?.startsWith("session-part:") || (id && nonLeftBorderIDs.has(id))) return false
+        const body = row.getChildren().find((child) => !nodeId(child)?.startsWith("compact-before-boundary:"))
+        return body instanceof BoxRenderable && Array.isArray(body.border) && body.border.join() === "left"
+      })
+      const anchor = rows.findIndex((row) => {
+        const id = nodeId(row)
+        return id !== undefined && userIDs.has(id)
+      })
+      if (anchor >= 0) {
+        const anchorID = nodeId(rows[anchor])!
+        const offset = leftBorderMessages.findIndex((message) => message.id === anchorID) - anchor
+        const candidate = rows[leftIndex - offset]
+        if (candidate) return candidate
+      } else if (rows.length > 0 && rows.length === leftBorderMessages.length) {
+        return rows[leftIndex]
+      }
     }
-    if (rows.length === users.length) return rows[index]
+    return
+  }
+
+  const messageIndex = messages.findIndex((message) => message.id === boundary.beforeID)
+  if (messageIndex <= 0) return
+  if (!messages.slice(0, messageIndex).some((message) => Boolean(directOrPartRow(message.id)))) return
+  for (let i = messageIndex + 1; i < messages.length; i++) {
+    if (messages[i].type === "compaction") continue
+    const next = directOrPartRow(messages[i].id)
+    if (next) return next
   }
 }
 
