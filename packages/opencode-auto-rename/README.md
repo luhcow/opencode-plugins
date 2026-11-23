@@ -16,7 +16,7 @@ Add the public GitHub release reference to `plugins` in your global or project-l
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.2.2::path:packages/opencode-auto-rename"
+    "github:luhcow/opencode-plugins#v0.2.3::path:packages/opencode-auto-rename"
   ]
 }
 ```

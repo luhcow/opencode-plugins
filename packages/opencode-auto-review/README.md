@@ -24,7 +24,7 @@
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "github:luhcow/opencode-plugins#v0.2.2::path:packages/opencode-auto-review",
+      "package": "github:luhcow/opencode-plugins#v0.2.3::path:packages/opencode-auto-review",
       "options": {
         // model 省略时直接继承当前对话模型（并优先使用 #low 档位）
         // reviewModel 省略时默认自动继承当前对话模型（并优先使用 #low 档位）

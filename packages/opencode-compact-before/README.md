@@ -9,8 +9,8 @@
 - 有未确认的撤销时，列表沿用撤销后的有效历史；提交压缩时由原生流程确认撤销。
 
 压缩成功后，TUI 会将当前摘要显示在保留起点消息之前，并标明“以上历史已总结”和
-“从下面这条消息开始保留在上下文中”。原生 `/compact` 或自动摘要压缩只要带有 `metadata.keepID` ，
-也会使用同一边界标记展示，并与 `/compact-before` 按最新有效检查点相互无缝接管；
+“从下面这条消息开始保留在上下文中”（`/compact-before` 标题为 `Compact before · 以上历史已总结`，
+原生带 `metadata.keepID` 的摘要压缩标题为 `Compaction · 以上历史已总结`），并与 `/compact-before` 按最新有效检查点相互无缝接管；
 没有 `keepID` 的整段摘要检查点或 Provider-native 压缩则保持原生检查点行显示。
 旧会话中的检查点会随原生历史加载、翻页与撤销状态自动定位；停用插件后恢复原生时间线显示。
 
@@ -22,7 +22,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.2.2::path:packages/opencode-compact-before"
+    "github:luhcow/opencode-plugins#v0.2.3::path:packages/opencode-compact-before"
   ]
 }
 ```
@@ -41,7 +41,7 @@ server 保存该次选择并调用 `session.compact({ id })`。匹配这次请�
 消息 ID 匹配用于定位本次选择，不改写其他压缩请求。
 
 原位显示通过 TUI 内部渲染节点实现：文字用户消息与助手首行的行 ID、助手分片行 ID（`session-part:...`）、
-`verbosity: "low"` 折叠活动组后的首个保留行、附件用户消息与 Shell 行之间的左边框位置、原生 Compaction 标题及 Markdown 节点用于定位，仅在边界视图挂载成功后隐藏对应原生摘要行。
+`verbosity: "low"` 折叠活动组后的首个保留行、附件用户消息与 Shell 行之间的左边框位置、原生 Compaction 标题及 Markdown 节点用于定位；当检查点对应有效未回滚的保留边界时直接隐藏底部重复原生摘要行，避免按需挂载滚动时发生跳变闪烁。
 摘要仍是同一个原生检查点，显示移动不写入消息。摘要读取由当前有效历史中的已完成压缩记录触发，不在新会话的乐观创建阶段提前查询服务端。
 这是用户确认采用的内部接口适配方式，兼容 OpenCode 2.2.2–2.3.x（OpenTUI 0.7 / 0.8）的滚动容器与节点结构。
 
