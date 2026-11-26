@@ -3,7 +3,6 @@ import {
   NOTICE_PREFIX,
   WAKE_PREFIX,
   applyContextOverrides,
-  buildFormFields,
   clip,
   extractEntries,
   formatQuestionAnswer,
@@ -15,17 +14,23 @@ import {
 import {
   ReaskRpc,
   type QuestionItem,
-  type ReaskCancelInput,
-  type ReaskCancelOutput,
+  type ReaskAbortInput,
+  type ReaskAbortOutput,
+  type ReaskCompleteInput,
+  type ReaskCompleteOutput,
   type ReaskEntry,
   type ReaskListOutput,
-  type ReaskRevertInput,
-  type ReaskRevertOutput,
-  type ReaskStartInput,
-  type ReaskStartOutput,
+  type ReaskPendingInput,
+  type ReaskPendingOutput,
+  type ReaskPrepareInput,
+  type ReaskPrepareOutput,
+  type ReaskRevertTargetInput,
+  type ReaskRevertTargetOutput,
 } from "./rpc.ts"
 
 const STORAGE_KEY = "overrides"
+const REASK_FORM_PREFIX = "frm_reask_"
+const FALLBACK_REPLY_DELAY_MS = 300
 
 type PendingReaskForm = {
   formID: string
@@ -38,6 +43,11 @@ type PendingReaskForm = {
   revertedFromMessageID?: string
 }
 
+function createReaskFormID(): string {
+  const rand = Math.random().toString(36).slice(2, 10)
+  return `${REASK_FORM_PREFIX}${Date.now().toString(36)}_${rand}`
+}
+
 export { formatQuestionAnswer }
 
 export default Plugin.define({
@@ -47,62 +57,14 @@ export default Plugin.define({
     const memoryOverrides = new Map<string, SessionOverrides>()
     const pendingForms = new Map<string, PendingReaskForm>()
     const pendingBySession = new Map<string, string>()
-    const extSession = ctx.session as unknown as {
-      revert?: {
-        stage?: (input: { sessionID: string; messageID: string; files?: boolean }) => Promise<unknown>
-        clear?: (input: { sessionID: string }) => Promise<unknown>
-        commit?: (input: { sessionID: string }) => Promise<unknown>
-      }
-      form?: {
-        create?: (input: {
-          sessionID: string
-          id?: string
-          title: string
-          metadata?: Record<string, unknown>
-          fields: unknown[]
-        }) => Promise<unknown>
-        cancel?: (input: { sessionID: string; formID: string; message?: string }) => Promise<unknown>
-      }
-    }
+    const fallbackTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-    const stageRevert = async (input: { sessionID: string; messageID: string; files?: boolean }) => {
-      if (typeof extSession.revert?.stage === "function") {
-        return extSession.revert.stage(input)
+    const clearFallbackTimer = (formID: string) => {
+      const timer = fallbackTimers.get(formID)
+      if (timer) {
+        clearTimeout(timer)
+        fallbackTimers.delete(formID)
       }
-      throw new Error("Reask requires a host with session.revert.stage support. Update OpenCode.")
-    }
-
-    const clearRevert = async (input: { sessionID: string }) => {
-      if (typeof extSession.revert?.clear === "function") {
-        return extSession.revert.clear(input)
-      }
-      throw new Error("Reask requires a host with session.revert.clear support. Update OpenCode.")
-    }
-
-    const commitRevert = async (input: { sessionID: string }) => {
-      if (typeof extSession.revert?.commit === "function") {
-        return extSession.revert.commit(input)
-      }
-      throw new Error("Reask requires a host with session.revert.commit support. Update OpenCode.")
-    }
-
-    const createForm = async (input: {
-      sessionID: string
-      title: string
-      metadata?: Record<string, unknown>
-      fields: unknown[]
-    }) => {
-      if (typeof extSession.form?.create === "function") {
-        return extSession.form.create(input)
-      }
-      throw new Error("Reask requires a host with session.form.create support. Update OpenCode.")
-    }
-
-    const cancelForm = async (input: { sessionID: string; formID: string }) => {
-      if (typeof extSession.form?.cancel === "function") {
-        return extSession.form.cancel(input)
-      }
-      throw new Error("Reask requires a host with session.form.cancel support. Update OpenCode.")
     }
 
     const loadSessionOverrides = async (sessionID: string): Promise<SessionOverrides> => {
@@ -132,17 +94,22 @@ export default Plugin.define({
       await ctx.storage.set(STORAGE_KEY, all)
     }
 
-    const cancelExistingPendingForm = async (sessionID: string, shouldClearRevert: boolean): Promise<boolean> => {
-      const existingFormID = pendingBySession.get(sessionID)
-      if (!existingFormID) return false
-      const pending = pendingForms.get(existingFormID)
-      pendingBySession.delete(sessionID)
-      pendingForms.delete(existingFormID)
-      await cancelForm({ sessionID, formID: existingFormID }).catch(() => {})
-      if (shouldClearRevert && pending?.revertStaged) {
-        await clearRevert({ sessionID }).catch(() => {})
+    const popPendingForSession = (
+      sessionID: string,
+      formID?: string,
+    ): { clearedFormID?: string; revertStaged?: boolean } => {
+      const targetFormID = formID ?? pendingBySession.get(sessionID)
+      if (!targetFormID) return {}
+      const pending = pendingForms.get(targetFormID)
+      clearFallbackTimer(targetFormID)
+      pendingForms.delete(targetFormID)
+      if (pendingBySession.get(sessionID) === targetFormID) {
+        pendingBySession.delete(sessionID)
       }
-      return true
+      return {
+        clearedFormID: targetFormID,
+        revertStaged: pending?.revertStaged ?? false,
+      }
     }
 
     const listSessionQuestions = async (sessionID: string): Promise<ReaskEntry[]> => {
@@ -153,79 +120,61 @@ export default Plugin.define({
       return extractEntries(unwrapMessages(rawMessages), overrides)
     }
 
-    const startReask = async (input: ReaskStartInput): Promise<ReaskStartOutput> => {
+    const resolveTargetEntry = (
+      entries: ReaskEntry[],
+      selector: { messageID?: string; toolCallID?: string; index?: number },
+    ): ReaskEntry | undefined => {
+      let target: ReaskEntry | undefined
+      if (selector.messageID && selector.toolCallID) {
+        target = entries.find((e) => e.messageID === selector.messageID && e.toolCallID === selector.toolCallID)
+      }
+      if (!target && selector.messageID) {
+        target = entries.findLast((e) => e.messageID === selector.messageID)
+      }
+      if (!target && selector.toolCallID) {
+        target = entries.find((e) => e.toolCallID === selector.toolCallID)
+      }
+      if (!target && typeof selector.index === "number") {
+        target = entries.find((e) => e.index === selector.index)
+      }
+      if (!target && !selector.messageID && !selector.toolCallID && selector.index === undefined) {
+        target = entries.at(-1)
+      }
+      return target
+    }
+
+    const prepareReask = async (input: ReaskPrepareInput): Promise<ReaskPrepareOutput> => {
       const { sessionID } = input
       try {
-        await cancelExistingPendingForm(sessionID, false)
+        const previous = popPendingForSession(sessionID)
 
         await ctx.session.interrupt({ sessionID }).catch(() => {})
         await ctx.session.wait({ sessionID }).catch(() => {})
 
         const entries = await listSessionQuestions(sessionID)
         if (entries.length === 0) {
-          return { ok: false, error: "No question (Ask) found in this session." }
+          return {
+            ok: false,
+            previousFormID: previous.clearedFormID,
+            previousRevertStaged: previous.revertStaged,
+            error: "No question (Ask) found in this session.",
+          }
         }
 
-        let target: ReaskEntry | undefined
-        if (input.messageID && input.toolCallID) {
-          target = entries.find((e) => e.messageID === input.messageID && e.toolCallID === input.toolCallID)
-        }
-        if (!target && input.messageID) {
-          target = entries.findLast((e) => e.messageID === input.messageID)
-        }
-        if (!target && input.toolCallID) {
-          target = entries.find((e) => e.toolCallID === input.toolCallID)
-        }
-        if (!target && typeof input.index === "number") {
-          target = entries.find((e) => e.index === input.index)
-        }
-        if (!target && !input.messageID && !input.toolCallID && input.index === undefined) {
-          target = entries.at(-1)
-        }
-
+        const target = resolveTargetEntry(entries, input)
         if (!target) {
           return {
             ok: false,
+            previousFormID: previous.clearedFormID,
+            previousRevertStaged: previous.revertStaged,
             error: `Target question not found (session has ${entries.length} question${entries.length === 1 ? "" : "s"}).`,
           }
         }
 
         const shouldRevert = input.revert !== false
-        const revertFiles = input.files !== false
-        let revertStaged = false
-        let revertedFromMessageID: string | undefined
-
-        if (shouldRevert && target.nextMessageID) {
-          await stageRevert({
-            sessionID,
-            messageID: target.nextMessageID,
-            files: revertFiles,
-          })
-          revertStaged = true
-          revertedFromMessageID = target.nextMessageID
-        }
-
-        const fields = buildFormFields(target.questions, target.answers)
-        const form = await createForm({
-          sessionID,
-          title: `Questions (Re-ask #${target.index})`,
-          metadata: {
-            kind: "question",
-            reask: {
-              messageID: target.messageID,
-              toolCallID: target.toolCallID,
-              index: target.index,
-            },
-          },
-          fields,
-        })
-
-        const formID =
-          (form as { id?: string; data?: { id?: string } })?.id ??
-          (form as { data?: { id?: string } })?.data?.id
-        if (!formID) {
-          return { ok: false, error: "Failed to create session form." }
-        }
+        const revertedFromMessageID = shouldRevert ? target.nextMessageID : undefined
+        const revertStaged = Boolean(revertedFromMessageID)
+        const formID = createReaskFormID()
 
         pendingForms.set(formID, {
           formID,
@@ -242,52 +191,125 @@ export default Plugin.define({
         return {
           ok: true,
           formID,
+          previousFormID: previous.clearedFormID,
+          previousRevertStaged: previous.revertStaged,
           messageID: target.messageID,
           toolCallID: target.toolCallID,
           index: target.index,
+          questions: target.questions,
+          answers: target.answers,
           revertedFromMessageID,
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return { ok: false, error: message }
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
       }
     }
 
-    const revertOnly = async (input: ReaskRevertInput): Promise<ReaskRevertOutput> => {
+    const resolveRevertTarget = async (input: ReaskRevertTargetInput): Promise<ReaskRevertTargetOutput> => {
       const { sessionID } = input
       try {
-        await cancelExistingPendingForm(sessionID, false)
+        const previous = popPendingForSession(sessionID)
+
         await ctx.session.interrupt({ sessionID }).catch(() => {})
         await ctx.session.wait({ sessionID }).catch(() => {})
 
         const entries = await listSessionQuestions(sessionID)
-        let target: ReaskEntry | undefined
-        if (input.messageID && input.toolCallID) {
-          target = entries.find((e) => e.messageID === input.messageID && e.toolCallID === input.toolCallID)
-        } else if (input.messageID) {
-          target = entries.findLast((e) => e.messageID === input.messageID)
-        } else if (typeof input.index === "number") {
-          target = entries.find((e) => e.index === input.index)
-        } else {
-          target = entries.at(-1)
-        }
-
+        const target = resolveTargetEntry(entries, input)
         if (!target) {
-          return { ok: false, error: "Target question not found." }
-        }
-        if (!target.nextMessageID) {
-          return { ok: true, revertedFromMessageID: undefined }
+          return {
+            ok: false,
+            previousFormID: previous.clearedFormID,
+            previousRevertStaged: previous.revertStaged,
+            error: "Target question not found.",
+          }
         }
 
-        await stageRevert({
-          sessionID,
-          messageID: target.nextMessageID,
-          files: input.files !== false,
-        })
-        return { ok: true, revertedFromMessageID: target.nextMessageID }
+        return {
+          ok: true,
+          previousFormID: previous.clearedFormID,
+          previousRevertStaged: previous.revertStaged,
+          revertedFromMessageID: target.nextMessageID,
+        }
       } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
       }
+    }
+
+    const finalizeRepliedForm = async (
+      pending: PendingReaskForm,
+      rawAnswer: Record<string, unknown>,
+      options: { resumeSession: boolean },
+    ): Promise<number> => {
+      const answers: string[][] = pending.questions.map((_, idx) => {
+        const val = rawAnswer[`q${idx}`]
+        if (val === undefined || val === null) return []
+        if (Array.isArray(val)) return val.map((v) => String(v)).filter(Boolean)
+        const str = String(val).trim()
+        return str ? [str] : []
+      })
+
+      const formatted = formatQuestionAnswer(pending.questions, answers)
+      const overrides = { ...(await loadSessionOverrides(pending.sessionID)) }
+
+      const key = makeKey(pending.messageID, pending.toolCallID)
+      overrides[key] = {
+        messageID: pending.messageID,
+        toolCallID: pending.toolCallID,
+        questions: pending.questions,
+        answers,
+        formatted,
+        updatedAt: Date.now(),
+      }
+
+      if (pending.revertStaged) {
+        const remainingMessages = unwrapMessages(
+          await ctx.session.context({ sessionID: pending.sessionID }).catch(() => []),
+        )
+        const validMessageIDs = new Set(remainingMessages.map((m) => m.id).filter(Boolean))
+        for (const [k, v] of Object.entries(overrides)) {
+          if (validMessageIDs.size > 0 && !validMessageIDs.has(v.messageID)) {
+            delete overrides[k]
+          }
+        }
+      }
+
+      await saveSessionOverrides(pending.sessionID, overrides)
+
+      await rpcRegistration.events
+        .emit("replied", {
+          sessionID: pending.sessionID,
+          messageID: pending.messageID,
+          toolCallID: pending.toolCallID,
+          index: pending.index,
+          answers,
+          formatted,
+        })
+        .catch(() => {})
+
+      const answerSummary = pending.questions
+        .map((q, idx) => `${q.header}: ${answers[idx]?.length ? answers[idx].join(", ") : "Unanswered"}`)
+        .join(" · ")
+
+      await ctx.session.synthetic({
+        sessionID: pending.sessionID,
+        text: `${WAKE_PREFIX}\n${formatted}`,
+        description: `Re-answered #${pending.index} (${clip(answerSummary, 100)})`,
+        metadata: {
+          source: "reask",
+          messageID: pending.messageID,
+          toolCallID: pending.toolCallID,
+          index: pending.index,
+        },
+        resume: options.resumeSession,
+      })
+
+      return pending.index
     }
 
     const rpcRegistration = await ctx.rpc.register(ReaskRpc, {
@@ -296,18 +318,50 @@ export default Plugin.define({
         const items = await listSessionQuestions(input.sessionID)
         return { items }
       },
-      start: async (rawInput): Promise<ReaskStartOutput> => {
-        return startReask(rawInput as ReaskStartInput)
+      prepare: async (rawInput): Promise<ReaskPrepareOutput> => {
+        return prepareReask(rawInput as ReaskPrepareInput)
       },
-      revertOnly: async (rawInput): Promise<ReaskRevertOutput> => {
-        return revertOnly(rawInput as ReaskRevertInput)
+      revertTarget: async (rawInput): Promise<ReaskRevertTargetOutput> => {
+        return resolveRevertTarget(rawInput as ReaskRevertTargetInput)
       },
-      cancel: async (rawInput): Promise<ReaskCancelOutput> => {
-        const input = rawInput as ReaskCancelInput
-        const cancelled = await cancelExistingPendingForm(input.sessionID, true)
+      pending: async (rawInput): Promise<ReaskPendingOutput> => {
+        const input = rawInput as ReaskPendingInput
+        const pending = pendingForms.get(input.formID)
+        if (!pending) return { exists: false }
+        return {
+          exists: true,
+          sessionID: pending.sessionID,
+          revertStaged: pending.revertStaged,
+        }
+      },
+      complete: async (rawInput): Promise<ReaskCompleteOutput> => {
+        const input = rawInput as ReaskCompleteInput
+        const pending = pendingForms.get(input.formID)
+        if (!pending) {
+          return { ok: false, error: "Pending re-ask form not found or already settled." }
+        }
+        clearFallbackTimer(input.formID)
+        pendingForms.delete(input.formID)
+        if (pendingBySession.get(pending.sessionID) === pending.formID) {
+          pendingBySession.delete(pending.sessionID)
+        }
+        try {
+          const index = await finalizeRepliedForm(pending, input.answer ?? {}, { resumeSession: true })
+          return { ok: true, index }
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        }
+      },
+      abort: async (rawInput): Promise<ReaskAbortOutput> => {
+        const input = rawInput as ReaskAbortInput
+        const cleared = popPendingForSession(input.sessionID, input.formID)
         return {
           ok: true,
-          message: cancelled ? "Cancelled pending re-ask and restored session state." : "No pending re-ask form.",
+          clearedFormID: cleared.clearedFormID,
+          revertStaged: cleared.revertStaged,
         }
       },
     })
@@ -339,89 +393,30 @@ export default Plugin.define({
           }
 
           if (ev.type === "form.replied" && ev.data?.id) {
-            const pending = pendingForms.get(ev.data.id)
+            const formID = ev.data.id
+            const pending = pendingForms.get(formID)
             if (!pending) continue
-            pendingForms.delete(ev.data.id)
-            if (pendingBySession.get(pending.sessionID) === pending.formID) {
-              pendingBySession.delete(pending.sessionID)
-            }
-
-            const rawAnswer = ev.data.answer ?? {}
-            const answers: string[][] = pending.questions.map((_, idx) => {
-              const val = rawAnswer[`q${idx}`]
-              if (val === undefined || val === null) return []
-              if (Array.isArray(val)) return val.map((v) => String(v)).filter(Boolean)
-              const str = String(val).trim()
-              return str ? [str] : []
-            })
-
-            const formatted = formatQuestionAnswer(pending.questions, answers)
-            const overrides = { ...(await loadSessionOverrides(pending.sessionID)) }
-
-            const key = makeKey(pending.messageID, pending.toolCallID)
-            overrides[key] = {
-              messageID: pending.messageID,
-              toolCallID: pending.toolCallID,
-              questions: pending.questions,
-              answers,
-              formatted,
-              updatedAt: Date.now(),
-            }
-
-            if (pending.revertStaged) {
-              await commitRevert({ sessionID: pending.sessionID }).catch(() => {})
-              const remainingMessages = unwrapMessages(
-                await ctx.session.context({ sessionID: pending.sessionID }).catch(() => []),
-              )
-              const validMessageIDs = new Set(remainingMessages.map((m) => m.id).filter(Boolean))
-              for (const [k, v] of Object.entries(overrides)) {
-                if (validMessageIDs.size > 0 && !validMessageIDs.has(v.messageID)) {
-                  delete overrides[k]
-                }
+            clearFallbackTimer(formID)
+            const answer = ev.data.answer ?? {}
+            const timer = setTimeout(() => {
+              fallbackTimers.delete(formID)
+              const current = pendingForms.get(formID)
+              if (!current) return
+              pendingForms.delete(formID)
+              if (pendingBySession.get(current.sessionID) === current.formID) {
+                pendingBySession.delete(current.sessionID)
               }
-            }
-
-            await saveSessionOverrides(pending.sessionID, overrides)
-
-            await rpcRegistration.events
-              .emit("replied", {
-                sessionID: pending.sessionID,
-                messageID: pending.messageID,
-                toolCallID: pending.toolCallID,
-                index: pending.index,
-                answers,
-                formatted,
+              void finalizeRepliedForm(current, answer, { resumeSession: !current.revertStaged }).catch((error) => {
+                console.error("[reask] fallback form.replied handling failed", error)
               })
-              .catch(() => {})
-
-            const answerSummary = pending.questions
-              .map((q, idx) => `${q.header}: ${answers[idx]?.length ? answers[idx].join(", ") : "Unanswered"}`)
-              .join(" · ")
-
-            await ctx.session.synthetic({
-              sessionID: pending.sessionID,
-              text: `${WAKE_PREFIX}\n${formatted}`,
-              description: `Re-answered #${pending.index} (${clip(answerSummary, 100)})`,
-              metadata: {
-                source: "reask",
-                messageID: pending.messageID,
-                toolCallID: pending.toolCallID,
-                index: pending.index,
-              },
-              resume: true,
-            })
+            }, FALLBACK_REPLY_DELAY_MS)
+            fallbackTimers.set(formID, timer)
           }
 
           if (ev.type === "form.cancelled" && ev.data?.id) {
             const pending = pendingForms.get(ev.data.id)
             if (!pending) continue
-            pendingForms.delete(ev.data.id)
-            if (pendingBySession.get(pending.sessionID) === pending.formID) {
-              pendingBySession.delete(pending.sessionID)
-            }
-            if (pending.revertStaged) {
-              await clearRevert({ sessionID: pending.sessionID }).catch(() => {})
-            }
+            popPendingForSession(pending.sessionID, pending.formID)
           }
         }
       } catch (error) {
@@ -434,13 +429,11 @@ export default Plugin.define({
     await ctx.command.transform((editor) => {
       editor.add({
         name: "reask",
-        description: "Re-answer a submitted or cancelled question (Ask). Usage: /reask [last|list|<n> [--keep-files]|cancel]",
+        description: "List Ask entries or run interactive /reask in TUI. Usage: /reask [list|cancel]",
         async execute({ sessionID, prompt }) {
           const raw = (prompt.text ?? "").replace(/^\/?(?:reask|ask-again)\b/i, "").trim()
           const tokens = raw.split(/\s+/).filter(Boolean)
           const head = (tokens[0] ?? "").toLowerCase()
-          const keepFiles = tokens.some((t) => t === "--keep-files" || t === "--no-files")
-          const noRevert = tokens.some((t) => t === "--no-revert")
 
           const notify = async (text: string) => {
             await ctx.session.synthetic({
@@ -453,8 +446,12 @@ export default Plugin.define({
           }
 
           if (head === "cancel" || head === "clear") {
-            const cancelled = await cancelExistingPendingForm(sessionID, true)
-            await notify(cancelled ? "已取消重答并恢复回滚前的会话状态。" : "当前没有正在进行的重答表单。")
+            const cleared = popPendingForSession(sessionID)
+            await notify(
+              cleared.clearedFormID
+                ? "已清理待重答表单记录（若仍暂存回滚，请在 TUI 中执行 /redo 恢复）。"
+                : "当前没有正在进行的重答表单。",
+            )
             return
           }
 
@@ -475,33 +472,21 @@ export default Plugin.define({
                 return `#${item.index} [${statusLabel}] ${clip(qPreview, 60)} -> ${clip(aPreview, 60)}`
               }),
               "",
-              "用法: /reask [编号] [--keep-files] | /reask last | /reask cancel",
+              "用法: 在 OpenCode TUI 中使用 /reask [编号] [--keep-files] | /reask last | <leader>k",
             ]
             await notify(lines.join("\n"))
             return
           }
 
-          const indexNum = head && head !== "last" && head !== "latest" ? Number(head) : undefined
-          if (indexNum !== undefined && (!Number.isInteger(indexNum) || indexNum < 1)) {
-            await notify("参数无效。用法: /reask [编号] [--keep-files] | /reask list | /reask cancel")
-            return
-          }
-
-          const res = await startReask({
-            sessionID,
-            ...(indexNum !== undefined ? { index: indexNum } : {}),
-            revert: !noRevert,
-            files: !keepFiles,
-          })
-          if (!res.ok) {
-            await notify(res.error ?? "无法启动重答表单。")
-          }
+          await notify("请在 OpenCode TUI 中使用 /reask、命令面板或快捷键 <leader>k 发起交互式重答。")
         },
       })
     })
 
     return () => {
       eventController.abort()
+      for (const timer of fallbackTimers.values()) clearTimeout(timer)
+      fallbackTimers.clear()
       memoryOverrides.clear()
       pendingForms.clear()
       pendingBySession.clear()

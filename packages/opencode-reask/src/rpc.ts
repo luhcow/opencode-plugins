@@ -28,7 +28,7 @@ export type ReaskListOutput = {
   items: ReaskEntry[]
 }
 
-export type ReaskStartInput = {
+export type ReaskPrepareInput = {
   sessionID: string
   messageID?: string
   toolCallID?: string
@@ -37,37 +37,66 @@ export type ReaskStartInput = {
   files?: boolean
 }
 
-export type ReaskStartOutput = {
+export type ReaskPrepareOutput = {
   ok: boolean
   formID?: string
+  previousFormID?: string
+  previousRevertStaged?: boolean
   messageID?: string
   toolCallID?: string
   index?: number
+  questions?: QuestionItem[]
+  answers?: string[][]
   revertedFromMessageID?: string
   error?: string
 }
 
-export type ReaskRevertInput = {
+export type ReaskRevertTargetInput = {
   sessionID: string
   messageID?: string
   toolCallID?: string
   index?: number
-  files?: boolean
 }
 
-export type ReaskRevertOutput = {
+export type ReaskRevertTargetOutput = {
   ok: boolean
+  previousFormID?: string
+  previousRevertStaged?: boolean
   revertedFromMessageID?: string
   error?: string
 }
 
-export type ReaskCancelInput = {
-  sessionID: string
+export type ReaskPendingInput = {
+  formID: string
 }
 
-export type ReaskCancelOutput = {
+export type ReaskPendingOutput = {
+  exists: boolean
+  sessionID?: string
+  revertStaged?: boolean
+}
+
+export type ReaskCompleteInput = {
+  sessionID: string
+  formID: string
+  answer: Record<string, unknown>
+}
+
+export type ReaskCompleteOutput = {
   ok: boolean
-  message?: string
+  index?: number
+  error?: string
+}
+
+export type ReaskAbortInput = {
+  sessionID: string
+  formID?: string
+}
+
+export type ReaskAbortOutput = {
+  ok: boolean
+  clearedFormID?: string
+  revertStaged?: boolean
 }
 
 export const ReaskRpc = Rpc.define({
@@ -91,7 +120,7 @@ export const ReaskRpc = Rpc.define({
         additionalProperties: false,
       },
     },
-    start: {
+    prepare: {
       input: {
         type: "object",
         properties: {
@@ -110,9 +139,13 @@ export const ReaskRpc = Rpc.define({
         properties: {
           ok: { type: "boolean" },
           formID: { type: "string" },
+          previousFormID: { type: "string" },
+          previousRevertStaged: { type: "boolean" },
           messageID: { type: "string" },
           toolCallID: { type: "string" },
           index: { type: "number" },
+          questions: { type: "array" },
+          answers: { type: "array" },
           revertedFromMessageID: { type: "string" },
           error: { type: "string" },
         },
@@ -120,7 +153,7 @@ export const ReaskRpc = Rpc.define({
         additionalProperties: false,
       },
     },
-    revertOnly: {
+    revertTarget: {
       input: {
         type: "object",
         properties: {
@@ -128,7 +161,6 @@ export const ReaskRpc = Rpc.define({
           messageID: { type: "string" },
           toolCallID: { type: "string" },
           index: { type: "number" },
-          files: { type: "boolean" },
         },
         required: ["sessionID"],
         additionalProperties: false,
@@ -137,6 +169,8 @@ export const ReaskRpc = Rpc.define({
         type: "object",
         properties: {
           ok: { type: "boolean" },
+          previousFormID: { type: "string" },
+          previousRevertStaged: { type: "boolean" },
           revertedFromMessageID: { type: "string" },
           error: { type: "string" },
         },
@@ -144,11 +178,54 @@ export const ReaskRpc = Rpc.define({
         additionalProperties: false,
       },
     },
-    cancel: {
+    pending: {
+      input: {
+        type: "object",
+        properties: {
+          formID: { type: "string" },
+        },
+        required: ["formID"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          exists: { type: "boolean" },
+          sessionID: { type: "string" },
+          revertStaged: { type: "boolean" },
+        },
+        required: ["exists"],
+        additionalProperties: false,
+      },
+    },
+    complete: {
       input: {
         type: "object",
         properties: {
           sessionID: { type: "string" },
+          formID: { type: "string" },
+          answer: { type: "object" },
+        },
+        required: ["sessionID", "formID", "answer"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          index: { type: "number" },
+          error: { type: "string" },
+        },
+        required: ["ok"],
+        additionalProperties: false,
+      },
+    },
+    abort: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          formID: { type: "string" },
         },
         required: ["sessionID"],
         additionalProperties: false,
@@ -157,7 +234,8 @@ export const ReaskRpc = Rpc.define({
         type: "object",
         properties: {
           ok: { type: "boolean" },
-          message: { type: "string" },
+          clearedFormID: { type: "string" },
+          revertStaged: { type: "boolean" },
         },
         required: ["ok"],
         additionalProperties: false,

@@ -1,5 +1,17 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { ReaskRpc, type QuestionItem, type ReaskEntry, type ReaskListOutput, type ReaskStartOutput, type ReaskRevertOutput, type ReaskCancelOutput } from "./rpc.ts"
+import { buildFormFields } from "./core.ts"
+import {
+  ReaskRpc,
+  type QuestionItem,
+  type ReaskAbortOutput,
+  type ReaskEntry,
+  type ReaskListOutput,
+  type ReaskPendingOutput,
+  type ReaskPrepareOutput,
+  type ReaskRevertTargetOutput,
+} from "./rpc.ts"
+
+const REASK_FORM_PREFIX = "frm_reask_"
 
 type RenderableLike = {
   id?: string
@@ -36,6 +48,11 @@ type QuestionHit = {
   toolCallID: string
   rowNode: RenderableLike
   cardNode?: RenderableLike
+}
+
+type ActiveReaskForm = {
+  sessionID: string
+  revertStaged: boolean
 }
 
 function clip(text: string, limit: number): string {
@@ -84,6 +101,7 @@ export default Plugin.define({
   id: "reask.tui",
   setup(context) {
     const rpc = context.client.rpc(ReaskRpc)
+    const activeForms = new Map<string, ActiveReaskForm>()
     let dialogOpen = false
 
     const getActiveSessionID = (): string | undefined => {
@@ -100,6 +118,13 @@ export default Plugin.define({
         if (session?.location) return session.location
       }
       return context.location ?? context.data.location.default()
+    }
+
+    const getRequestOptions = (sessionID?: string) => {
+      const location = getLocationForSession(sessionID)
+      return location?.directory
+        ? { headers: { "x-opencode-directory": encodeURIComponent(location.directory) } }
+        : undefined
     }
 
     const listLocalQuestions = (sessionID: string): ReaskEntry[] => {
@@ -159,7 +184,7 @@ export default Plugin.define({
 
     const fetchQuestions = async (sessionID: string): Promise<ReaskEntry[]> => {
       try {
-        const res = await rpc.list({ sessionID }, { location: getLocationForSession(sessionID) }) as ReaskListOutput
+        const res = (await rpc.list({ sessionID }, { location: getLocationForSession(sessionID) })) as ReaskListOutput
         if (res?.items && Array.isArray(res.items)) {
           return res.items as ReaskEntry[]
         }
@@ -179,9 +204,20 @@ export default Plugin.define({
     }) => {
       context.ui.dialog.clear()
       dialogOpen = false
+      const location = getLocationForSession(input.sessionID)
+      const reqOpts = getRequestOptions(input.sessionID)
       try {
-        const res = await rpc.start(input, { location: getLocationForSession(input.sessionID) }) as ReaskStartOutput
-        if (!res.ok) {
+        const res = (await rpc.prepare(input, { location })) as ReaskPrepareOutput
+        if (res.previousFormID) {
+          activeForms.delete(res.previousFormID)
+          await context.client.session.form
+            .cancel({ sessionID: input.sessionID, formID: res.previousFormID }, reqOpts)
+            .catch(() => {})
+        }
+        if (!res.ok || !res.formID || !res.questions?.length) {
+          if (res.previousRevertStaged) {
+            await context.client.session.revert.clear({ sessionID: input.sessionID }, reqOpts).catch(() => {})
+          }
           context.ui.toast.show({
             title: "Re-ask",
             message: res.error ?? "Failed to open question form",
@@ -190,7 +226,72 @@ export default Plugin.define({
           })
           return
         }
-        await context.data.session.form.sync(input.sessionID, getLocationForSession(input.sessionID)).catch(() => {})
+
+        const fields = buildFormFields(res.questions, res.answers ?? [])
+        if (fields.length === 0) {
+          await rpc.abort({ sessionID: input.sessionID, formID: res.formID }, { location }).catch(() => {})
+          context.ui.toast.show({
+            title: "Re-ask",
+            message: "Selected question has no renderable fields.",
+            variant: "error",
+            duration: 4000,
+          })
+          return
+        }
+
+        const shouldRevert = input.revert !== false
+        const revertFiles = input.files !== false
+        let revertStaged = false
+
+        if (shouldRevert && res.revertedFromMessageID) {
+          try {
+            await context.client.session.revert.stage(
+              {
+                sessionID: input.sessionID,
+                messageID: res.revertedFromMessageID,
+                files: revertFiles,
+              },
+              reqOpts,
+            )
+            revertStaged = true
+          } catch (error) {
+            await rpc.abort({ sessionID: input.sessionID, formID: res.formID }, { location }).catch(() => {})
+            throw error
+          }
+        } else if (res.previousRevertStaged) {
+          await context.client.session.revert.clear({ sessionID: input.sessionID }, reqOpts).catch(() => {})
+        }
+
+        activeForms.set(res.formID, { sessionID: input.sessionID, revertStaged })
+        try {
+          await context.client.session.form.create(
+            {
+              sessionID: input.sessionID,
+              id: res.formID,
+              title: `Questions (Re-ask #${res.index ?? 1})`,
+              metadata: {
+                kind: "question",
+                reask: {
+                  messageID: res.messageID ?? "",
+                  toolCallID: res.toolCallID ?? "",
+                  index: res.index ?? 1,
+                  revertStaged,
+                },
+              },
+              fields: [fields[0]!, ...fields.slice(1)],
+            },
+            reqOpts,
+          )
+        } catch (error) {
+          activeForms.delete(res.formID)
+          await rpc.abort({ sessionID: input.sessionID, formID: res.formID }, { location }).catch(() => {})
+          if (revertStaged) {
+            await context.client.session.revert.clear({ sessionID: input.sessionID }, reqOpts).catch(() => {})
+          }
+          throw error
+        }
+
+        await context.data.session.form.sync(input.sessionID, location).catch(() => {})
         await context.data.session.sync(input.sessionID).catch(() => {})
       } catch (error) {
         context.ui.toast.show({
@@ -211,8 +312,24 @@ export default Plugin.define({
     }) => {
       context.ui.dialog.clear()
       dialogOpen = false
+      const location = getLocationForSession(input.sessionID)
+      const reqOpts = getRequestOptions(input.sessionID)
       try {
-        const res = await rpc.revertOnly(input, { location: getLocationForSession(input.sessionID) }) as ReaskRevertOutput
+        const res = (await rpc.revertTarget(
+          {
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            toolCallID: input.toolCallID,
+            index: input.index,
+          },
+          { location },
+        )) as ReaskRevertTargetOutput
+        if (res.previousFormID) {
+          activeForms.delete(res.previousFormID)
+          await context.client.session.form
+            .cancel({ sessionID: input.sessionID, formID: res.previousFormID }, reqOpts)
+            .catch(() => {})
+        }
         if (!res.ok) {
           context.ui.toast.show({
             title: "Revert failed",
@@ -222,6 +339,23 @@ export default Plugin.define({
           })
           return
         }
+        if (!res.revertedFromMessageID) {
+          context.ui.toast.show({
+            title: "Revert",
+            message: "No messages after this question to revert.",
+            variant: "info",
+            duration: 3000,
+          })
+          return
+        }
+        await context.client.session.revert.stage(
+          {
+            sessionID: input.sessionID,
+            messageID: res.revertedFromMessageID,
+            files: input.files !== false,
+          },
+          reqOpts,
+        )
         await context.data.session.sync(input.sessionID).catch(() => {})
         context.ui.toast.show({
           title: "Reverted",
@@ -238,6 +372,97 @@ export default Plugin.define({
         })
       }
     }
+
+    const cancelActiveReask = async (sessionID: string) => {
+      const location = getLocationForSession(sessionID)
+      const reqOpts = getRequestOptions(sessionID)
+      const res = (await rpc.abort({ sessionID }, { location })) as ReaskAbortOutput
+
+      let formID = res.clearedFormID
+      let revertStaged = Boolean(res.revertStaged)
+      for (const [id, entry] of activeForms.entries()) {
+        if (entry.sessionID === sessionID) {
+          formID ??= id
+          revertStaged = revertStaged || entry.revertStaged
+          activeForms.delete(id)
+        }
+      }
+
+      if (formID) {
+        await context.client.session.form.cancel({ sessionID, formID }, reqOpts).catch(() => {})
+      }
+      if (revertStaged) {
+        await context.client.session.revert.clear({ sessionID }, reqOpts).catch(() => {})
+      }
+      await context.data.session.form.sync(sessionID, location).catch(() => {})
+      await context.data.session.sync(sessionID).catch(() => {})
+
+      context.ui.toast.show({
+        title: "Re-ask",
+        message: formID ? "Cancelled pending re-ask and restored session state." : "No pending re-ask form.",
+        variant: "info",
+        duration: 2500,
+      })
+    }
+
+    const resolveTrackedForm = async (formID: string, sessionID: string): Promise<ActiveReaskForm | undefined> => {
+      const tracked = activeForms.get(formID)
+      if (tracked) {
+        activeForms.delete(formID)
+        return tracked
+      }
+      if (!formID.startsWith(REASK_FORM_PREFIX)) return undefined
+      try {
+        const pending = (await rpc.pending({ formID }, { location: getLocationForSession(sessionID) })) as ReaskPendingOutput
+        if (!pending.exists) return undefined
+        return {
+          sessionID: pending.sessionID ?? sessionID,
+          revertStaged: Boolean(pending.revertStaged),
+        }
+      } catch {
+        return undefined
+      }
+    }
+
+    const unsubFormReplied = context.data.on("form.replied", (event) => {
+      const formID = event.data.id
+      const sessionID = event.data.sessionID
+      const answer = (event.data.answer ?? {}) as Record<string, unknown>
+      void (async () => {
+        const tracked = await resolveTrackedForm(formID, sessionID)
+        if (!tracked) return
+        const location = getLocationForSession(tracked.sessionID)
+        const reqOpts = getRequestOptions(tracked.sessionID)
+        if (tracked.revertStaged) {
+          await context.client.session.revert.commit({ sessionID: tracked.sessionID }, reqOpts).catch(() => {})
+        }
+        await rpc.complete({ sessionID: tracked.sessionID, formID, answer }, { location }).catch((error) => {
+          context.ui.toast.show({
+            title: "Re-ask failed",
+            message: error instanceof Error ? error.message : String(error),
+            variant: "error",
+            duration: 4000,
+          })
+        })
+        await context.data.session.sync(tracked.sessionID).catch(() => {})
+      })()
+    })
+
+    const unsubFormCancelled = context.data.on("form.cancelled", (event) => {
+      const formID = event.data.id
+      const sessionID = event.data.sessionID
+      void (async () => {
+        const tracked = await resolveTrackedForm(formID, sessionID)
+        if (!tracked) return
+        const location = getLocationForSession(tracked.sessionID)
+        const reqOpts = getRequestOptions(tracked.sessionID)
+        if (tracked.revertStaged) {
+          await context.client.session.revert.clear({ sessionID: tracked.sessionID }, reqOpts).catch(() => {})
+        }
+        await rpc.abort({ sessionID: tracked.sessionID, formID }, { location }).catch(() => {})
+        await context.data.session.sync(tracked.sessionID).catch(() => {})
+      })()
+    })
 
     const showQuestionPreview = async (sessionID: string, entry: ReaskEntry) => {
       const lines = entry.questions.flatMap((q, idx) => {
@@ -449,13 +674,7 @@ export default Plugin.define({
             const noRevert = tokens.some((t) => t === "--no-revert")
 
             if (head === "cancel" || head === "clear") {
-              const res = await rpc.cancel({ sessionID }, { location: getLocationForSession(sessionID) }) as ReaskCancelOutput
-              context.ui.toast.show({
-                title: "Re-ask",
-                message: res.message ?? "Cancelled",
-                variant: "info",
-                duration: 2500,
-              })
+              await cancelActiveReask(sessionID)
               return
             }
 
@@ -566,7 +785,7 @@ export default Plugin.define({
       return undefined
     }
 
-    const root = context.renderer.root as unknown as RenderableLike
+    const root = context.renderer?.root as unknown as RenderableLike | undefined
     let hoveredCard: RenderableLike | undefined
 
     const clearHoveredCard = () => {
@@ -580,63 +799,70 @@ export default Plugin.define({
       hoveredCard = undefined
     }
 
-    const prevMouseOver = root._mouseListeners?.over
-    const prevMouseOut = root._mouseListeners?.out
-    const prevMouseUp = root._mouseListeners?.up
+    const prevMouseOver = root?._mouseListeners?.over
+    const prevMouseOut = root?._mouseListeners?.out
+    const prevMouseUp = root?._mouseListeners?.up
 
-    root.onMouseOver = (event: MouseEventLike) => {
-      prevMouseOver?.call(root, event)
-      if (dialogOpen) return
-      const hit = findQuestionHit(event.target)
-      if (hit?.cardNode && hit.cardNode !== hoveredCard) {
-        clearHoveredCard()
-        hoveredCard = hit.cardNode
-        try {
-          hoveredCard.backgroundColor = context.theme.decrease(context.theme.background.raised.base)
-        } catch {
-          // ignore
+    if (root) {
+      root.onMouseOver = (event: MouseEventLike) => {
+        prevMouseOver?.call(root, event)
+        if (dialogOpen) return
+        const hit = findQuestionHit(event.target)
+        if (hit?.cardNode && hit.cardNode !== hoveredCard) {
+          clearHoveredCard()
+          hoveredCard = hit.cardNode
+          try {
+            hoveredCard.backgroundColor = context.theme.decrease(context.theme.background.raised.base)
+          } catch {
+            // ignore
+          }
+        } else if (!hit && hoveredCard) {
+          clearHoveredCard()
         }
-      } else if (!hit && hoveredCard) {
+      }
+
+      root.onMouseOut = (event: MouseEventLike) => {
+        prevMouseOut?.call(root, event)
+        if (hoveredCard) {
+          clearHoveredCard()
+        }
+      }
+
+      root.onMouseUp = (event: MouseEventLike) => {
+        prevMouseUp?.call(root, event)
+        if (dialogOpen) return
+        if (event.button !== undefined && event.button !== 0) return
+        const renderer = context.renderer as unknown as {
+          getSelection?: () => { getSelectedText?: () => string } | null
+        }
+        if (renderer.getSelection?.()?.getSelectedText?.()) return
+
+        const hit = findQuestionHit(event.target)
+        if (!hit) return
+
         clearHoveredCard()
+        void (async () => {
+          const items = await fetchQuestions(hit.sessionID)
+          const entry =
+            items.find((e) => e.messageID === hit.messageID && e.toolCallID === hit.toolCallID) ??
+            items.findLast((e) => e.messageID === hit.messageID)
+          if (!entry) return
+          await openQuestionActionsDialog(hit.sessionID, entry)
+        })()
       }
-    }
-
-    root.onMouseOut = (event: MouseEventLike) => {
-      prevMouseOut?.call(root, event)
-      if (hoveredCard) {
-        clearHoveredCard()
-      }
-    }
-
-    root.onMouseUp = (event: MouseEventLike) => {
-      prevMouseUp?.call(root, event)
-      if (dialogOpen) return
-      if (event.button !== undefined && event.button !== 0) return
-      const renderer = context.renderer as unknown as {
-        getSelection?: () => { getSelectedText?: () => string } | null
-      }
-      if (renderer.getSelection?.()?.getSelectedText?.()) return
-
-      const hit = findQuestionHit(event.target)
-      if (!hit) return
-
-      clearHoveredCard()
-      void (async () => {
-        const items = await fetchQuestions(hit.sessionID)
-        const entry =
-          items.find((e) => e.messageID === hit.messageID && e.toolCallID === hit.toolCallID) ??
-          items.findLast((e) => e.messageID === hit.messageID)
-        if (!entry) return
-        await openQuestionActionsDialog(hit.sessionID, entry)
-      })()
     }
 
     return () => {
       unsubReplied()
+      unsubFormReplied()
+      unsubFormCancelled()
+      activeForms.clear()
       clearHoveredCard()
-      root.onMouseOver = prevMouseOver
-      root.onMouseOut = prevMouseOut
-      root.onMouseUp = prevMouseUp
+      if (root) {
+        root.onMouseOver = prevMouseOver
+        root.onMouseOut = prevMouseOut
+        root.onMouseUp = prevMouseUp
+      }
     }
   },
 })

@@ -41,7 +41,7 @@ OpenCode V2 通过包的 `exports` 自动加载 Server、TUI 和 RPC 契约。�
 
 本地开发时，在仓库根目录执行 `npm ci` ，并在该目录的项目配置中改用 `./packages/opencode-reask` 。相对路径以配置文件所在目录解析。
 
-需要宿主支持 `session.revert` 和 `session.form` API。所有操作使用当前宿主连接，适用于本地、独立和远程服务。
+通过 OpenCode TUI 客户端的 `session.revert` 和 `session.form` API 与服务端插件协同工作，所有操作使用当前宿主连接，适用于本地、独立和远程服务。
 新答案通过宿主的插件 storage 保存，并用于更新该会话的模型上下文。
 
 ---
@@ -50,7 +50,7 @@ OpenCode V2 通过包的 `exports` 自动加载 Server、TUI 和 RPC 契约。�
 
 ### 1. 鼠标点击问答卡片（TUI）
 
-在会话消息流中，将鼠标移动到任意 `# Questions` 卡片（或被取消的 `Asked N questions` 行）上会显示高亮背景，左键点击即可打开 **Question Actions** 菜单：
+在启用鼠标且卡片仍位于实时渲染树中时，将鼠标移动到 `# Questions` 卡片（或被取消的 `Asked N questions` 行）上会显示高亮背景，左键点击即可打开 **Question Actions** 菜单（在 OpenCode 2.4+ 默认 `split-footer` 模式下请优先使用快捷键 `<leader>k`、命令面板或 `/reask`）：
 
 - **Re-answer & Revert**：回滚该问答之后的对话与文件改动，并在底部弹出原生问答表单。
 - **Re-answer (Keep files)**：仅回滚该问答之后的对话（保留文件修改），并弹出原生问答表单。
