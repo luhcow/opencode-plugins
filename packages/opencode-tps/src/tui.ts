@@ -1,7 +1,30 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createElement, effect, insert, insertNode, setProp } from "@opentui/solid"
-import { createMemo, createSignal, Show, type JSX } from "solid-js"
-import { createTpsTracker, formatTpsLabel, type HistoryMessageLike, type TpsSnapshot } from "./core.ts"
+import { createMemo, createSignal, onCleanup, Show, type JSX } from "solid-js"
+import {
+  createTpsTracker,
+  resolveTpsFooterDisplay,
+  type HistoryMessageLike,
+  type TpsFooterDisplay,
+} from "./core.ts"
+
+type ResizeEmitterLike = {
+  width?: number
+  isDestroyed?: boolean
+  on?: (event: string, listener: (...args: unknown[]) => void) => void
+  off?: (event: string, listener: (...args: unknown[]) => void) => void
+  removeListener?: (event: string, listener: (...args: unknown[]) => void) => void
+}
+
+function readPositiveWidth(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function removeResizeListener(emitter: ResizeEmitterLike | undefined, listener: (...args: unknown[]) => void) {
+  if (!emitter || emitter.isDestroyed) return
+  if (typeof emitter.off === "function") emitter.off("resize", listener)
+  else emitter.removeListener?.("resize", listener)
+}
 
 export default Plugin.define({
   id: "tps.tui",
@@ -154,9 +177,59 @@ export default Plugin.define({
       }),
     ]
 
-    context.ui.slot({
+    let disposed = false
+    const renderer = (context as { renderer?: ResizeEmitterLike }).renderer
+    const [terminalWidth, setTerminalWidth] = createSignal<number | undefined>(
+      typeof renderer?.width === "number" && Number.isFinite(renderer.width) ? renderer.width : undefined,
+    )
+    const onRendererResize = (width: unknown) => {
+      if (disposed) return
+      const next =
+        typeof width === "number" && Number.isFinite(width)
+          ? width
+          : typeof renderer?.width === "number" && Number.isFinite(renderer.width)
+            ? renderer.width
+            : undefined
+      setTerminalWidth(next)
+    }
+    renderer?.on?.("resize", onRendererResize)
+
+    const removeSlot = context.ui.slot({
       append: "prompt.footer.status",
       render: (props) => {
+        const [containerWidth, setContainerWidth] = createSignal<number | undefined>(undefined)
+        let trackedParent: ResizeEmitterLike | undefined
+        const onParentResize = () => {
+          if (disposed || !trackedParent || trackedParent.isDestroyed) return
+          const next = readPositiveWidth(trackedParent.width)
+          if (next !== undefined) {
+            queueMicrotask(() => {
+              if (!disposed) setContainerWidth(next)
+            })
+          }
+        }
+        const detachParent = () => {
+          removeResizeListener(trackedParent, onParentResize)
+          trackedParent = undefined
+        }
+        const attachParent = (node: unknown) => {
+          if (disposed) return
+          const parent = (node as { parent?: ResizeEmitterLike | null } | null | undefined)?.parent
+          if (!parent || parent.isDestroyed) return
+          if (parent !== trackedParent) {
+            detachParent()
+            trackedParent = parent
+            parent.on?.("resize", onParentResize)
+          }
+          const next = readPositiveWidth(parent.width)
+          if (next !== undefined) {
+            queueMicrotask(() => {
+              if (!disposed) setContainerWidth(next)
+            })
+          }
+        }
+        onCleanup(detachParent)
+
         const snapshot = createMemo(() => {
           const now = tick()
           const sessionID = props.sessionID
@@ -173,15 +246,28 @@ export default Plugin.define({
           )
         })
 
+        const display = createMemo(() => {
+          terminalWidth()
+          const activeParentWidth = trackedParent && !trackedParent.isDestroyed ? containerWidth() : undefined
+          return resolveTpsFooterDisplay({
+            snapshot: snapshot(),
+            mode: props.mode,
+            showDetails: props.showDetails,
+            width: activeParentWidth ?? terminalWidth(),
+          })
+        })
+
         return Show({
           get when() {
-            return props.mode === "normal" && props.showDetails ? snapshot() : undefined
+            return display()
           },
-          children: (value: () => TpsSnapshot) => {
+          children: (value: () => TpsFooterDisplay) => {
             const box = createElement("box")
             setProp(box, "flexShrink", 0)
+            setProp(box, "height", 1)
             const text = createElement("text")
             setProp(text, "wrapMode", "none")
+            setProp(text, "truncate", true)
             effect((prev) =>
               setProp(
                 text,
@@ -190,8 +276,9 @@ export default Plugin.define({
                 prev,
               ),
             )
-            insert(text, () => formatTpsLabel(value()))
+            insert(text, () => value().label)
             insertNode(box, text)
+            queueMicrotask(() => attachParent(box))
             // OpenTUI accepts native renderables; Solid's shared JSX type is DOM-oriented.
             return box as unknown as JSX.Element
           },
@@ -200,6 +287,9 @@ export default Plugin.define({
     })
 
     return () => {
+      disposed = true
+      removeSlot()
+      removeResizeListener(renderer, onRendererResize)
       if (timer) {
         clearInterval(timer)
         timer = undefined

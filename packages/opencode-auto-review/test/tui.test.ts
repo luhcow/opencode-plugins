@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { resolveAutoReviewFooterLabel } from "../src/tui-state.js"
 import tui from "../src/tui.js"
 
 // tsx transpiles TSX with the classic runtime, while the plugin's JSX targets
@@ -12,17 +13,27 @@ import tui from "../src/tui.js"
 }
 
 /** A stateful fake RPC server so the TUI state is real, not just handler capture. */
-function harness(options: { enabled?: boolean; failSwitch?: boolean } = {}) {
+function harness(options: { enabled?: boolean; failSwitch?: boolean; width?: number } = {}) {
   let enabled = options.enabled ?? true
   let humanFallback = true
   let failStatus = false
   const statusCalls: Array<{ input: unknown; options: any }> = []
   const toasts: any[] = []
   const connectedHandlers: Array<() => void> = []
+  const resizeHandlers = new Set<(width?: number) => void>()
   const eventHandlers = new Map<string, (event: any) => void>()
   let selectReplies: string[] = []
   const commands: any[] = []
   let slotClaim: any
+  const renderer = options.width === undefined ? undefined : {
+    width: options.width,
+    on: (event: string, handler: (width?: number) => void) => {
+      if (event === "resize") resizeHandlers.add(handler)
+    },
+    off: (event: string, handler: (width?: number) => void) => {
+      if (event === "resize") resizeHandlers.delete(handler)
+    },
+  }
   const client: any = {
     status: async (input: unknown, callOptions: any) => {
       statusCalls.push({ input, options: callOptions })
@@ -44,6 +55,7 @@ function harness(options: { enabled?: boolean; failSwitch?: boolean } = {}) {
   const context: any = {
     options: {},
     location: { directory: "/repo", workspaceID: "ws" },
+    renderer,
     client: { rpc: () => client },
     data: { on: (_name: string, handler: () => void) => { connectedHandlers.push(handler); return () => undefined } },
     ui: {
@@ -63,13 +75,18 @@ function harness(options: { enabled?: boolean; failSwitch?: boolean } = {}) {
     serverFallback: () => humanFallback,
     emitNotice: (data: unknown, location?: unknown) => eventHandlers.get("notice")?.({ data, location }),
     connect: () => connectedHandlers.forEach((handler) => handler()),
+    resize: (width: number) => {
+      if (renderer) renderer.width = width
+      resizeHandlers.forEach((handler) => handler(width))
+    },
     // The host renders a slot claim inside a component, which is where the
     // keymap layer must be registered. Invoking render exercises that path.
-    renderSlot: () => {
-      const element = slotClaim.render({ mode: "normal" })
+    renderSlot: (input: { mode?: string; showDetails?: boolean } = {}) => {
+      const element = slotClaim.render({ mode: input.mode ?? "normal", showDetails: input.showDetails })
       // The stub factory only records the element; invoke the component the
       // way a renderer would so its body (and keymap registration) runs.
-      if (element && typeof element.type === "function") element.type(element.props)
+      if (element && typeof element.type === "function") return element.type(element.props)
+      return element
     },
   }
 }
@@ -197,4 +214,71 @@ test("setup never registers a keymap layer outside the component tree", async ()
   h.context.keymap.layer = () => { throw new Error("Keymap.Provider is missing") }
   const cleanup = await tui.setup(h.context)
   await cleanup?.()
+})
+
+test("resolveAutoReviewFooterLabel adapts to mode, showDetails, and width thresholds", () => {
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: false, mode: "normal", width: 100 }), undefined)
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "shell", width: 100 }), undefined)
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "normal", showDetails: false, width: 100 }), undefined)
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "normal", width: 43 }), undefined)
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "normal", width: 44 }), "Auto")
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "normal", width: 63 }), "Auto")
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "normal", width: 64 }), "Auto Mode")
+  assert.equal(resolveAutoReviewFooterLabel({ enabled: true, mode: "normal", width: undefined }), "Auto Mode")
+})
+
+test("footer badge locks single-line props and adapts dynamically to terminal and parent width", async () => {
+  const h = harness({ enabled: true, width: 100 })
+  const cleanup = await tui.setup(h.context)
+
+  const wideShow = h.renderSlot({ mode: "normal", showDetails: true })
+  assert.equal(wideShow.props.when, "Auto Mode")
+
+  const childFactory = wideShow.children[0] as (label: () => string) => any
+  const box = childFactory(() => wideShow.props.when)
+  assert.equal(box.type, "box")
+  assert.equal(box.props.flexShrink, 0)
+  assert.equal(box.props.height, 1)
+
+  const text = box.children[0]
+  assert.equal(text.type, "text")
+  assert.equal(text.props.wrapMode, "none")
+  assert.equal(text.props.truncate, true)
+
+  // Shrink terminal to compact range -> "Auto"
+  h.resize(55)
+  assert.equal(h.renderSlot({ mode: "normal", showDetails: true }).props.when, "Auto")
+
+  // Shrink below 44 cols -> hidden, while keymap command stays registered
+  h.resize(40)
+  assert.equal(h.renderSlot({ mode: "normal", showDetails: true }).props.when, undefined)
+  assert.ok(h.commands.some((command) => command.id === "auto-review.toggle"))
+
+  // Parent container width narrower than wide terminal (e.g. sidebar open) triggers compact/hide
+  h.resize(120)
+  const parentHandlers = new Set<() => void>()
+  const parent = {
+    width: 50,
+    isDestroyed: false,
+    on: (event: string, listener: () => void) => { if (event === "resize") parentHandlers.add(listener) },
+    off: (event: string, listener: () => void) => { if (event === "resize") parentHandlers.delete(listener) },
+  }
+  box.props.ref({ parent })
+  await tick()
+  assert.equal(h.renderSlot({ mode: "normal", showDetails: true }).props.when, "Auto")
+
+  parent.width = 40
+  parentHandlers.forEach((listener) => listener())
+  await tick()
+  assert.equal(h.renderSlot({ mode: "normal", showDetails: true }).props.when, undefined)
+
+  // Expanding parent restores full label; showDetails=false still hides it
+  parent.width = 90
+  parentHandlers.forEach((listener) => listener())
+  await tick()
+  assert.equal(h.renderSlot({ mode: "normal", showDetails: true }).props.when, "Auto Mode")
+  assert.equal(h.renderSlot({ mode: "normal", showDetails: false }).props.when, undefined)
+
+  await cleanup?.()
+  assert.equal(parentHandlers.size, 0)
 })

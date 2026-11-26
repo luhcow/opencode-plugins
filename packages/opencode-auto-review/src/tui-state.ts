@@ -1,3 +1,22 @@
+export const AUTO_REVIEW_HIDE_WIDTH = 44
+export const AUTO_REVIEW_COMPACT_WIDTH = 64
+
+export interface AutoReviewFooterLabelInput {
+  readonly enabled: boolean
+  readonly mode: string
+  readonly showDetails?: boolean | undefined
+  readonly width?: number | undefined
+}
+
+export function resolveAutoReviewFooterLabel(input: AutoReviewFooterLabelInput): string | undefined {
+  if (!input.enabled || input.mode !== "normal" || input.showDetails === false) return undefined
+  if (input.width !== undefined && Number.isFinite(input.width)) {
+    if (input.width < AUTO_REVIEW_HIDE_WIDTH) return undefined
+    if (input.width < AUTO_REVIEW_COMPACT_WIDTH) return "Auto"
+  }
+  return "Auto Mode"
+}
+
 export interface AutoReviewLocation {
   directory?: string
   workspaceID?: string

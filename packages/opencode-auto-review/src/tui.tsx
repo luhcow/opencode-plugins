@@ -2,7 +2,25 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, Show } from "solid-js"
 import { AutoReview } from "./rpc.js"
-import { createAutoReviewController } from "./tui-state.js"
+import { createAutoReviewController, resolveAutoReviewFooterLabel } from "./tui-state.js"
+
+type ResizeEmitterLike = {
+  width?: number
+  isDestroyed?: boolean
+  on?: (event: string, listener: (...args: unknown[]) => void) => void
+  off?: (event: string, listener: (...args: unknown[]) => void) => void
+  removeListener?: (event: string, listener: (...args: unknown[]) => void) => void
+}
+
+function readPositiveWidth(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function removeResizeListener(emitter: ResizeEmitterLike | undefined, listener: (...args: unknown[]) => void) {
+  if (!emitter || emitter.isDestroyed) return
+  if (typeof emitter.off === "function") emitter.off("resize", listener)
+  else emitter.removeListener?.("resize", listener)
+}
 
 export default Plugin.define({
   id: "opencode-auto-review.tui",
@@ -49,10 +67,62 @@ export default Plugin.define({
     // A reconnect may have missed state events; re-query the authoritative state.
     const stopConnected = ctx.data.on("server.connected", () => void controller.refresh())
 
+    const renderer = (ctx as { renderer?: ResizeEmitterLike }).renderer
+    const [terminalWidth, setTerminalWidth] = createSignal<number | undefined>(
+      typeof renderer?.width === "number" && Number.isFinite(renderer.width) ? renderer.width : undefined,
+    )
+    const [containerWidth, setContainerWidth] = createSignal<number | undefined>(undefined)
+
+    let trackedParent: ResizeEmitterLike | undefined
+    const onParentResize = () => {
+      if (disposed || !trackedParent || trackedParent.isDestroyed) return
+      const next = readPositiveWidth(trackedParent.width)
+      if (next !== undefined) {
+        queueMicrotask(() => {
+          if (!disposed) setContainerWidth(next)
+        })
+      }
+    }
+    const detachParent = () => {
+      removeResizeListener(trackedParent, onParentResize)
+      trackedParent = undefined
+    }
+    const attachParent = (node: unknown) => {
+      queueMicrotask(() => {
+        if (disposed) return
+        const parent = (node as { parent?: ResizeEmitterLike | null } | null | undefined)?.parent
+        if (!parent || parent.isDestroyed) return
+        if (parent !== trackedParent) {
+          detachParent()
+          trackedParent = parent
+          parent.on?.("resize", onParentResize)
+        }
+        const next = readPositiveWidth(parent.width)
+        if (next !== undefined) {
+          setContainerWidth(next)
+        }
+      })
+    }
+    const onRendererResize = (width: unknown) => {
+      if (disposed) return
+      if (trackedParent?.isDestroyed) {
+        detachParent()
+        setContainerWidth(undefined)
+      }
+      const next =
+        typeof width === "number" && Number.isFinite(width)
+          ? width
+          : typeof renderer?.width === "number" && Number.isFinite(renderer.width)
+            ? renderer.width
+            : undefined
+      setTerminalWidth(next)
+    }
+    renderer?.on?.("resize", onRendererResize)
+
     // A keymap layer is owned by the calling Solid component. `setup` runs
     // outside the keymap provider tree, so registering here would throw
     // "Keymap.Provider is missing"; register from a rendered component instead.
-    const Status = (props: { mode: string }) => {
+    const Status = (props: { mode: string; showDetails?: boolean | undefined }) => {
       ctx.keymap.layer(() => ({
         mode: "global",
         priority: 10,
@@ -121,22 +191,38 @@ export default Plugin.define({
         base: typeof ctx.theme.text.base
         default?: typeof ctx.theme.text.base
       }
+      const footerLabel = () => {
+        const rendererWidth = terminalWidth()
+        const activeParentWidth = trackedParent && !trackedParent.isDestroyed ? containerWidth() : undefined
+        return resolveAutoReviewFooterLabel({
+          enabled: enabled(),
+          mode: props.mode,
+          showDetails: props.showDetails,
+          width: activeParentWidth ?? rendererWidth,
+        })
+      }
       return (
-        <Show when={enabled() && props.mode === "normal"}>
-          <text fg={primary.base ?? primary.default}>
-            <b>Auto Mode</b>
-          </text>
+        <Show when={footerLabel()}>
+          {(label) => (
+            <box ref={attachParent} flexShrink={0} height={1}>
+              <text wrapMode="none" truncate={true} fg={primary.base ?? primary.default}>
+                <b>{label()}</b>
+              </text>
+            </box>
+          )}
         </Show>
       )
     }
 
     const removeStatus = ctx.ui.slot({
       append: "prompt.footer.status",
-      render: ({ mode }) => <Status mode={mode} />,
+      render: ({ mode, showDetails }) => <Status mode={mode} showDetails={showDetails} />,
     })
 
     return () => {
       disposed = true
+      detachParent()
+      removeResizeListener(renderer, onRendererResize)
       stopConnected()
       stopNotices()
       controller.dispose()

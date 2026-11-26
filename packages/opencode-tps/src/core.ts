@@ -147,12 +147,55 @@ export function historyTurnTps(
   }
 }
 
-export function formatTpsLabel(snapshot: TpsSnapshot): string {
+export const TPS_HIDE_WIDTH = 44
+export const TPS_COMPACT_WIDTH = 72
+
+export interface FormatTpsOptions {
+  readonly compact?: boolean
+}
+
+export function formatTpsLabel(snapshot: TpsSnapshot, options?: FormatTpsOptions): string {
+  if (options?.compact) {
+    const rate = Math.round(snapshot.tps)
+    if (snapshot.streaming) {
+      return snapshot.exact ? `⚡ ${rate} t/s` : `⚡ ~${rate} t/s`
+    }
+    return snapshot.exact ? `${rate} t/s` : `~${rate} t/s`
+  }
   const rate = snapshot.tps.toFixed(1)
   if (snapshot.streaming) {
     return snapshot.exact ? `⚡ ${rate} tok/s` : `⚡ ~${rate} tok/s`
   }
   return snapshot.exact ? `${rate} tok/s` : `~${rate} tok/s`
+}
+
+export interface ResolveTpsFooterDisplayInput {
+  readonly snapshot: TpsSnapshot | undefined
+  readonly mode: string
+  readonly showDetails?: boolean
+  readonly width?: number
+}
+
+export interface TpsFooterDisplay {
+  readonly label: string
+  readonly streaming: boolean
+  readonly compact: boolean
+}
+
+export function resolveTpsFooterDisplay(input: ResolveTpsFooterDisplayInput): TpsFooterDisplay | undefined {
+  if (!input.snapshot || input.mode !== "normal" || input.showDetails === false) {
+    return undefined
+  }
+  let compact = false
+  if (input.width !== undefined && Number.isFinite(input.width)) {
+    if (input.width < TPS_HIDE_WIDTH) return undefined
+    compact = input.width < TPS_COMPACT_WIDTH
+  }
+  return {
+    label: formatTpsLabel(input.snapshot, { compact }),
+    streaming: input.snapshot.streaming,
+    compact,
+  }
 }
 
 export function createTpsTracker() {

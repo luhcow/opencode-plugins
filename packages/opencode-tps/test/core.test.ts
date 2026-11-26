@@ -6,7 +6,9 @@ import {
   estimateTokens,
   formatTpsLabel,
   historyTurnTps,
+  resolveTpsFooterDisplay,
   type HistoryMessageLike,
+  type TpsSnapshot,
 } from "../src/core.ts"
 
 test("estimateTokens handles ASCII, CJK, and mixed text", () => {
@@ -276,4 +278,36 @@ test("OpenCode 2.3.0 firstToken excludes TTFT during live streaming and in histo
   assert.equal(fromHistory.tokens, 300)
   assert.equal(fromHistory.durationMs, 4_000)
   assert.equal(fromHistory.tps, 75)
+})
+
+test("formatTpsLabel and resolveTpsFooterDisplay adapt to footer width and visibility flags", () => {
+  const streamingEst: TpsSnapshot = { tps: 75.4, tokens: 150, durationMs: 2_000, streaming: true, exact: false }
+  const settledExact: TpsSnapshot = { tps: 75.4, tokens: 150, durationMs: 2_000, streaming: false, exact: true }
+
+  assert.equal(formatTpsLabel(streamingEst), "⚡ ~75.4 tok/s")
+  assert.equal(formatTpsLabel(streamingEst, { compact: true }), "⚡ ~75 t/s")
+  assert.equal(formatTpsLabel(settledExact), "75.4 tok/s")
+  assert.equal(formatTpsLabel(settledExact, { compact: true }), "75 t/s")
+
+  assert.equal(resolveTpsFooterDisplay({ snapshot: undefined, mode: "normal", showDetails: true, width: 100 }), undefined)
+  assert.equal(resolveTpsFooterDisplay({ snapshot: streamingEst, mode: "shell", showDetails: true, width: 100 }), undefined)
+  assert.equal(resolveTpsFooterDisplay({ snapshot: streamingEst, mode: "normal", showDetails: false, width: 100 }), undefined)
+  assert.equal(resolveTpsFooterDisplay({ snapshot: streamingEst, mode: "normal", showDetails: true, width: 43 }), undefined)
+
+  assert.deepEqual(
+    resolveTpsFooterDisplay({ snapshot: streamingEst, mode: "normal", showDetails: true, width: 44 }),
+    { label: "⚡ ~75 t/s", streaming: true, compact: true },
+  )
+  assert.deepEqual(
+    resolveTpsFooterDisplay({ snapshot: settledExact, mode: "normal", showDetails: true, width: 71 }),
+    { label: "75 t/s", streaming: false, compact: true },
+  )
+  assert.deepEqual(
+    resolveTpsFooterDisplay({ snapshot: settledExact, mode: "normal", showDetails: true, width: 72 }),
+    { label: "75.4 tok/s", streaming: false, compact: false },
+  )
+  assert.deepEqual(
+    resolveTpsFooterDisplay({ snapshot: streamingEst, mode: "normal", showDetails: true }),
+    { label: "⚡ ~75.4 tok/s", streaming: true, compact: false },
+  )
 })
