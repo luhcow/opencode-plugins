@@ -28,7 +28,7 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:luhcow/opencode-plugins#v0.2.3::path:packages/opencode-recall"
+    "github:luhcow/opencode-plugins#v0.2.4::path:packages/opencode-recall"
   ]
 }
 ```
@@ -37,7 +37,7 @@ OpenCode V2 历史会话语义检索（RAG）插件，基于内置 `node:sqlite`
 
 ```jsonc
 {
-  "package": "github:luhcow/opencode-plugins#v0.2.3::path:packages/opencode-recall",
+  "package": "github:luhcow/opencode-plugins#v0.2.4::path:packages/opencode-recall",
   "options": {
     "modelUri": "hf:Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
     "contextSize": 2048,
